@@ -172,8 +172,8 @@ def determine_country(city, retailer):
     return "Unknown"
 
 # --- 6. MAIN APP LOGIC ---
-st.title("AI Shelf Intelligence")
-st.markdown("Use AI to generate structured data tables that provide insight into shelf dynamics across key retailers and channels globally.")
+st.title("🔍 AI Shelf Intelligence")
+st.markdown("Use AI to generate structured data tables that provide insight into shelf dynamics across key retailers and channels globally")
 
 uploaded_files = st.file_uploader("Upload Shelf Images", type=['jpg', 'jpeg', 'png', 'webp'], accept_multiple_files=True)
 
@@ -230,40 +230,3 @@ if uploaded_files and api_key:
             progress_bar.progress((i + 1) / total_files)
             
         # --- 7. FINAL TABLE ---
-        if all_products:
-            final_df = pd.concat(all_products, ignore_index=True)
-            
-            # Reorder Columns (Added Image_Name at the start)
-            desired_order = [
-                "Image_Name", "Country", "City", "Retailer", "Category", 
-                "Product_Name", "Brand", "Manufacturer", 
-                "Pack_Size", "Quantity", "Price", "Promo", 
-                "Position", "Facings", "Confidence"
-            ]
-            
-            # Ensure columns exist
-            for col in desired_order:
-                if col not in final_df.columns:
-                    final_df[col] = ""
-            
-            final_df = final_df[desired_order]
-            
-            st.success("✅ Audit Complete!")
-            
-            # Display
-            st.write("### 📊 Audit Data Preview")
-            st.dataframe(final_df.style.apply(highlight_low_confidence, axis=1))
-            
-            # Download
-            csv = final_df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="📥 Download Excel/CSV Report",
-                data=csv,
-                file_name="ai_shelf_intelligence_data.csv",
-                mime="text/csv"
-            )
-        else:
-            st.warning("No data extracted. Please check image quality.")
-
-elif uploaded_files and not api_key:
-    st.warning("⚠️ Please enter your API Key in the sidebar or secrets to start.")
