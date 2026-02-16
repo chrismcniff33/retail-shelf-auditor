@@ -7,7 +7,7 @@ import io
 import hmac
 
 # --- 1. PAGE CONFIGURATION ---
-st.set_page_config(page_title="Retail Shelf Auditor Pro", page_icon="🛒", layout="wide")
+st.set_page_config(page_title="AI Shelf Intelligence", page_icon="🛒", layout="wide")
 
 # Custom CSS for a professional look
 st.markdown("""
@@ -88,7 +88,7 @@ with st.sidebar:
     4. Download the Excel report.
     """)
 
-# --- 4. SYSTEM PROMPT ---
+# --- 4. SYSTEM PROMPT (UPDATED FOR GRANULARITY) ---
 SYSTEM_PROMPT = """
 You are a global retail data expert. Analyze this shelf image. 
 Context: The image filename suggests the retailer and city.
@@ -99,7 +99,9 @@ Return a strictly valid JSON list of objects with these exact keys:
 1. "Product_Name": Specific name on label.
 2. "Brand": Brand name.
 3. "Manufacturer": (Enrichment) Who owns this brand? (e.g., for Twinings write 'Associated British Foods').
-4. "Category": (Enrichment) Map to nearest Euromonitor category (e.g., 'Hot Drinks', 'Dairy', 'Confectionery').
+4. "Category": (Enrichment) Map to the most GRANULAR Euromonitor category possible. 
+   - Do NOT use high-level aggregations like 'Hot Drinks' or 'Beauty'.
+   - USE specific sub-categories: e.g., 'Black Tea', 'Green Tea', 'Instant Coffee', 'Shampoo', 'Conditioner', 'Facial Cleansers'.
 5. "Pack_Size": Weight/Volume if visible (e.g., '500g', '1L'). Else 'N/A'.
 6. "Quantity": Unit count if visible (e.g., '160 bags'). Else '1'.
 7. "Price": Price on tag. If missing, write 'N/A'.
@@ -111,7 +113,7 @@ Return a strictly valid JSON list of objects with these exact keys:
 Output STRICT JSON only. No markdown.
 """
 
-# --- 5. HELPER FUNCTIONS ---
+# --- 5. HELPER FUNCTIONS (UPDATED LOGIC) ---
 def parse_filename(filename):
     """Extracts Retailer and City from 'Retailer-City-ID.jpg'"""
     try:
@@ -130,22 +132,48 @@ def highlight_low_confidence(row):
         return ['background-color: #fff3cd'] * len(row)
     return [''] * len(row)
 
-def determine_country(city):
-    """Simple mapping for common cities to Countries"""
-    city_lower = city.lower()
-    if city_lower in ['london', 'manchester', 'birmingham', 'leeds', 'glasgow']:
-        return "UK"
-    elif city_lower in ['paris', 'lyon', 'marseille']:
-        return "France"
-    elif city_lower in ['new york', 'chicago', 'los angeles', 'miami']:
-        return "USA"
-    elif city_lower in ['berlin', 'munich', 'hamburg']:
-        return "Germany"
+def determine_country(city, retailer):
+    """
+    Robust mapping for Country based on City first, then Retailer.
+    """
+    city_clean = city.lower().strip()
+    retailer_clean = retailer.lower().strip()
+    
+    # 1. City Mapping (Most Accurate)
+    city_map = {
+        'london': 'UK', 'manchester': 'UK', 'birmingham': 'UK', 'leeds': 'UK', 'glasgow': 'UK',
+        'dublin': 'Ireland', 'cork': 'Ireland',
+        'paris': 'France', 'lyon': 'France', 'marseille': 'France',
+        'berlin': 'Germany', 'munich': 'Germany', 'hamburg': 'Germany', 'frankfurt': 'Germany',
+        'new york': 'USA', 'chicago': 'USA', 'los angeles': 'USA', 'miami': 'USA', 'houston': 'USA',
+        'toronto': 'Canada', 'vancouver': 'Canada',
+        'sydney': 'Australia', 'melbourne': 'Australia',
+        'tokyo': 'Japan', 'osaka': 'Japan'
+    }
+    
+    if city_clean in city_map:
+        return city_map[city_clean]
+
+    # 2. Retailer Mapping (Fallback)
+    retailer_map = {
+        'tesco': 'UK', 'sainsburys': 'UK', 'asda': 'UK', 'waitrose': 'UK', 'morrisons': 'UK',
+        'dunnes': 'Ireland', 'supervalu': 'Ireland',
+        'walmart': 'USA', 'target': 'USA', 'kroger': 'USA', 'whole foods': 'USA',
+        'carrefour': 'France', 'leclerc': 'France',
+        'edeka': 'Germany', 'rewe': 'Germany', 'aldi': 'Germany', 'lidl': 'Germany',
+        'woolworths': 'Australia', 'coles': 'Australia'
+    }
+    
+    # Check if retailer string contains key keywords
+    for key, country in retailer_map.items():
+        if key in retailer_clean:
+            return country
+            
     return "Unknown"
 
 # --- 6. MAIN APP LOGIC ---
-st.title("🛒 Retail Shelf Auditor Pro")
-st.markdown("Generates structured data with **Manufacturer**, **Euromonitor Categories**, and **Promo Details** automatically.")
+st.title("AI Shelf Intelligence")
+st.markdown("Use AI to generate structured data tables that provide insight into shelf dynamics across key retailers and channels globally.")
 
 uploaded_files = st.file_uploader("Upload Shelf Images", type=['jpg', 'jpeg', 'png', 'webp'], accept_multiple_files=True)
 
@@ -168,7 +196,8 @@ if uploaded_files and api_key:
                 
                 # 1. Metadata
                 retailer, city = parse_filename(file.name)
-                country = determine_country(city)
+                # Pass both city and retailer to the logic function
+                country = determine_country(city, retailer)
                 
                 # 2. Image Data
                 image_bytes = file.getvalue()
@@ -185,6 +214,7 @@ if uploaded_files and api_key:
                     df_chunk = pd.read_json(io.StringIO(json_str))
                     
                     # 5. Add Metadata Columns
+                    df_chunk['Image_Name'] = file.name
                     df_chunk['Retailer'] = retailer
                     df_chunk['City'] = city
                     df_chunk['Country'] = country
@@ -203,9 +233,9 @@ if uploaded_files and api_key:
         if all_products:
             final_df = pd.concat(all_products, ignore_index=True)
             
-            # Reorder Columns
+            # Reorder Columns (Added Image_Name at the start)
             desired_order = [
-                "Country", "City", "Retailer", "Category", 
+                "Image_Name", "Country", "City", "Retailer", "Category", 
                 "Product_Name", "Brand", "Manufacturer", 
                 "Pack_Size", "Quantity", "Price", "Promo", 
                 "Position", "Facings", "Confidence"
@@ -229,7 +259,7 @@ if uploaded_files and api_key:
             st.download_button(
                 label="📥 Download Excel/CSV Report",
                 data=csv,
-                file_name="retail_audit_full.csv",
+                file_name="ai_shelf_intelligence_data.csv",
                 mime="text/csv"
             )
         else:
