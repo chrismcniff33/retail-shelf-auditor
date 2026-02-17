@@ -5,7 +5,6 @@ from PIL import Image
 import time
 import io
 import hmac
-import json
 import re
 
 # --- 1. PAGE CONFIGURATION ---
@@ -66,7 +65,7 @@ with st.sidebar:
     4. Download the Excel report.
     """)
 
-# --- 4. SYSTEM PROMPT ---
+# --- 4. SYSTEM PROMPT (UPDATED WITH COUNTRY INTELLIGENCE) ---
 SYSTEM_PROMPT = """
 You are a global retail data expert. Analyze this shelf image. 
 Context: The image filename suggests the retailer and city.
@@ -78,15 +77,18 @@ Return a strictly valid JSON list of objects with these exact keys:
 2. "Brand": Brand name.
 3. "Manufacturer": (Enrichment) Who owns this brand? (e.g., for Twinings write 'Associated British Foods').
 4. "Category": (Enrichment) Map to the most GRANULAR Euromonitor category possible. 
-   - Do NOT use high-level aggregations like 'Hot Drinks' or 'Beauty'.
-   - USE specific sub-categories: e.g., 'Black Tea', 'Green Tea', 'Instant Coffee', 'Shampoo', 'Conditioner', 'Facial Cleansers'.
-5. "Pack_Size": Weight/Volume if visible (e.g., '500g', '1L'). Else 'N/A'.
-6. "Quantity": Unit count if visible (e.g., '160 bags'). Else '1'.
-7. "Price": Price on tag. If missing, write 'N/A'.
-8. "Promo": Description of any yellow/red promo tag (e.g., 'Buy 1 Get 1'). If none, write ''.
-9. "Position": Shelf level (Top/Middle/Bottom).
-10. "Facings": Integer count of identical items side-by-side.
-11. "Confidence": 'High' if text is clear, 'Low' if blurry or obstructed.
+   - Do NOT use high-level aggregations like 'Hot Drinks'. Use 'Black Tea', 'Green Tea', 'Instant Coffee'.
+5. "Country": (Enrichment) Identify the Country based on the City/Retailer provided in context OR the language on the packaging.
+   - Example: If City is 'Bogota', Country is 'Colombia'.
+   - Example: If City is 'Lagos', Country is 'Nigeria'.
+   - Example: If Retailer is 'Tesco', Country is 'UK'.
+6. "Pack_Size": Weight/Volume if visible (e.g., '500g', '1L'). Else 'N/A'.
+7. "Quantity": Unit count if visible (e.g., '160 bags'). Else '1'.
+8. "Price": Price on tag. If missing, write 'N/A'.
+9. "Promo": Description of any yellow/red promo tag. If none, write ''.
+10. "Position": Shelf level (Top/Middle/Bottom).
+11. "Facings": Integer count of identical items side-by-side.
+12. "Confidence": 'High' if text is clear, 'Low' if blurry or obstructed.
 
 Output STRICT JSON only. No markdown.
 """
@@ -108,70 +110,42 @@ def highlight_low_confidence(row):
         return ['background-color: #fff3cd'] * len(row)
     return [''] * len(row)
 
-def determine_country(city, retailer):
-    city_clean = city.lower().strip()
-    retailer_clean = retailer.lower().strip()
-    
-    city_map = {
-        'london': 'UK', 'manchester': 'UK', 'birmingham': 'UK', 'leeds': 'UK', 'glasgow': 'UK',
-        'dublin': 'Ireland', 'cork': 'Ireland',
-        'paris': 'France', 'lyon': 'France', 'marseille': 'France',
-        'berlin': 'Germany', 'munich': 'Germany', 'hamburg': 'Germany', 'frankfurt': 'Germany',
-        'new york': 'USA', 'chicago': 'USA', 'los angeles': 'USA', 'miami': 'USA', 'houston': 'USA',
-        'toronto': 'Canada', 'vancouver': 'Canada',
-        'sydney': 'Australia', 'melbourne': 'Australia',
-        'tokyo': 'Japan', 'osaka': 'Japan'
-    }
-    if city_clean in city_map: return city_map[city_clean]
+# (Note: determine_country function removed. We now let the AI handle this!)
 
-    retailer_map = {
-        'tesco': 'UK', 'sainsburys': 'UK', 'asda': 'UK', 'waitrose': 'UK', 'morrisons': 'UK',
-        'dunnes': 'Ireland', 'supervalu': 'Ireland',
-        'walmart': 'USA', 'target': 'USA', 'kroger': 'USA', 'whole foods': 'USA',
-        'carrefour': 'France', 'leclerc': 'France',
-        'edeka': 'Germany', 'rewe': 'Germany', 'aldi': 'Germany', 'lidl': 'Germany',
-        'woolworths': 'Australia', 'coles': 'Australia'
-    }
-    for key, country in retailer_map.items():
-        if key in retailer_clean: return country
-            
-    return "Unknown"
-
-# --- 6. ROBUST IMAGE PROCESSOR ---
-def process_image(uploaded_file):
-    """Sanitizes image to standard RGB JPEG to prevent format errors."""
+# --- 6. SMART IMAGE PROCESSOR ---
+def prepare_image(uploaded_file, resize=False):
+    """
+    Standardizes image to RGB.
+    If resize=True, shrinks image to 1024px to fix '500 Internal' errors.
+    """
     try:
         image = Image.open(uploaded_file)
         if image.mode != 'RGB':
             image = image.convert('RGB')
+        
+        if resize:
+            image.thumbnail((1024, 1024))
+            
         img_byte_arr = io.BytesIO()
-        image.save(img_byte_arr, format='JPEG', quality=95)
+        image.save(img_byte_arr, format='JPEG', quality=90)
         return img_byte_arr.getvalue()
     except Exception as e:
-        st.error(f"Could not convert image {uploaded_file.name}. Error: {e}")
         return None
 
-# --- 7. ROBUST JSON PARSER ---
 def clean_and_parse_json(text_response):
-    """
-    Attempts to fix common AI JSON errors (like extra text or missing brackets).
-    """
     try:
-        # 1. Try direct cleaning
         clean_text = text_response.replace("```json", "").replace("```", "").strip()
         return pd.read_json(io.StringIO(clean_text))
     except ValueError:
         try:
-            # 2. Advanced regex extraction: Find the first '[' and last ']'
             match = re.search(r'\[.*\]', text_response, re.DOTALL)
             if match:
-                json_str = match.group(0)
-                return pd.read_json(io.StringIO(json_str))
+                return pd.read_json(io.StringIO(match.group(0)))
         except:
             pass
     return None
 
-# --- 8. MAIN APP LOGIC ---
+# --- 7. MAIN APP LOGIC ---
 st.title("🔍 AI Shelf Intelligence")
 st.markdown("Use AI to generate structured data tables that provide insight into shelf dynamics across key retailers and channels globally")
 
@@ -190,45 +164,59 @@ if uploaded_files and api_key:
         total_files = len(uploaded_files)
         
         for i, file in enumerate(uploaded_files):
+            status_text.write(f"Analyzing {i+1}/{total_files}: **{file.name}**")
+            
             try:
-                status_text.write(f"Analyzing {i+1}/{total_files}: **{file.name}**")
-                
-                # Metadata
+                # 1. Metadata
                 retailer, city = parse_filename(file.name)
-                country = determine_country(city, retailer)
+                # Note: We stopped calculating 'Country' here. The AI does it now.
                 
-                # Image Processing
-                image_bytes = process_image(file)
+                # 2. ATTEMPT 1: Full Resolution
+                image_bytes = prepare_image(file, resize=False)
                 
                 if image_bytes:
-                    # AI Call
-                    response = model.generate_content([
-                        SYSTEM_PROMPT + f"\nContext: This store is in {city}, {retailer}.",
-                        {"mime_type": "image/jpeg", "data": image_bytes}
-                    ])
-                    
-                    # Parse Response
-                    if response.text:
+                    try:
+                        response = model.generate_content([
+                            SYSTEM_PROMPT + f"\nContext: This store is in {city}, {retailer}.",
+                            {"mime_type": "image/jpeg", "data": image_bytes}
+                        ])
                         df_chunk = clean_and_parse_json(response.text)
                         
-                        if df_chunk is not None and not df_chunk.empty:
-                            # Add Metadata
-                            df_chunk['Image_Name'] = file.name
-                            df_chunk['Retailer'] = retailer
-                            df_chunk['City'] = city
-                            df_chunk['Country'] = country
-                            all_products.append(df_chunk)
+                    except Exception as e:
+                        # 3. ATTEMPT 2: SMART RETRY (If 500/Internal Error)
+                        if "500" in str(e) or "internal" in str(e).lower():
+                            st.warning(f"⚠️ High density detected in {file.name}. Resizing and retrying...")
+                            
+                            resized_bytes = prepare_image(file, resize=True)
+                            
+                            response = model.generate_content([
+                                SYSTEM_PROMPT + f"\nContext: This store is in {city}, {retailer}.",
+                                {"mime_type": "image/jpeg", "data": resized_bytes}
+                            ])
+                            df_chunk = clean_and_parse_json(response.text)
                         else:
-                            st.warning(f"⚠️ Image {file.name} processed, but no products were found or data was unclear.")
+                            raise e 
+
+                    # 4. Save Data
+                    if df_chunk is not None and not df_chunk.empty:
+                        # Add Metadata that the AI doesn't have access to (Filenames)
+                        df_chunk['Image_Name'] = file.name
+                        df_chunk['Retailer'] = retailer
+                        df_chunk['City'] = city
+                        # Note: 'Country' is now coming INSIDE df_chunk from the AI
+                        
+                        all_products.append(df_chunk)
+                    else:
+                        st.warning(f"⚠️ Could not extract data from {file.name} (Image unclear)")
                 
-                time.sleep(2)
+                time.sleep(2) 
                 
             except Exception as e:
-                st.error(f"❌ Critical Error on {file.name}: {e}")
+                st.error(f"❌ Skipped {file.name}: {e}")
             
             progress_bar.progress((i + 1) / total_files)
             
-        # --- 9. FINAL TABLE & EXPORT ---
+        # --- 8. FINAL TABLE ---
         if all_products:
             final_df = pd.concat(all_products, ignore_index=True)
             
@@ -257,7 +245,7 @@ if uploaded_files and api_key:
                 mime="text/csv"
             )
         else:
-            st.error("❌ No data was generated. This usually means the API Key is invalid or the images were too blurry for the AI to read.")
+            st.error("❌ No data generated. Please check your API Key or Image Quality.")
 
 elif uploaded_files and not api_key:
     st.warning("⚠️ Please enter your API Key in the sidebar or secrets to start.")
