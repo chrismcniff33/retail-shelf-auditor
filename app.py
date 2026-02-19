@@ -115,7 +115,7 @@ Task: Extract all visible products and return a JSON list of objects with these 
      'Asian Speciality Drinks'.
    - FOR OTHER FMCG: Map to the most GRANULAR Euromonitor category possible.
 5. "Country": Identify the Country based on the City/Retailer provided.
-6. "Pack_Size": Weight/Volume (e.g., '330ml', '500ml', '1.5L'). If OCR is unreadable, ESTIMATE volume using visual spatial reasoning (aspect ratio, relative height to shelf). 
+6. "Pack_Size": Return strictly as a NUMBER. Convert all soft drinks to milliliters (ml) (e.g., if it's 1.5L, output 1500. If 330ml, output 330). Convert all solid foods to grams (g) (e.g., if 1kg, output 1000). If OCR is unreadable, ESTIMATE the volume in ml/g using visual spatial reasoning. Do not write 'ml' or 'g', just the number.
 7. "Quantity": Unit count if visible. Else '1'.
 8. "Price": Price on tag. Write numbers only if possible. If missing, write 'N/A'.
 9. "Promo": Description of any promo tag. If none, write ''.
@@ -141,6 +141,33 @@ def highlight_low_confidence(row):
         return ['background-color: #fff3cd'] * len(row)
     return [''] * len(row)
 
+def standardize_pack_size(val):
+    """Forces the pack size to be a pure number in ml or g, catching any AI formatting stray letters."""
+    s = str(val).strip().lower()
+    if s in ['n/a', 'nan', 'none', '', 'null']: 
+        return 'N/A'
+    
+    multiplier = 1
+    # Check for unit types to standardize (e.g., converting Liters to ml, kg to g)
+    if 'ml' in s:
+        pass
+    elif 'l' in s and 'ml' not in s:
+        multiplier = 1000
+    elif 'kg' in s:
+        multiplier = 1000
+    elif 'g' in s and 'kg' not in s:
+        pass
+        
+    # Extract just the numeric part
+    num_match = re.search(r'[\d\.]+', s.replace(',', '.'))
+    if num_match:
+        try:
+            num = float(num_match.group()) * multiplier
+            return str(int(num)) if num.is_integer() else str(num)
+        except ValueError:
+            return 'N/A'
+    return 'N/A'
+
 def standardize_and_fix_prices(df):
     """Cleans currency formatting and auto-corrects decimal OCR errors based on local median."""
     if 'Price' not in df.columns:
@@ -162,7 +189,6 @@ def standardize_and_fix_prices(df):
             else:
                 s = s.replace(',', '')
         elif ',' in s:
-            # If a comma is followed by exactly 2 digits, it's likely a decimal (e.g., 1,50)
             if re.search(r',\d{2}$', s):
                 s = s.replace(',', '.')
             else:
@@ -173,34 +199,27 @@ def standardize_and_fix_prices(df):
         except ValueError:
             return None
 
-    # Step 1: Clean raw strings into floats
     df['Clean_Price'] = df['Price'].apply(extract_number)
     
-    # Step 2: Auto-correct outliers by shifting the decimal point
     valid_prices = df['Clean_Price'].dropna()
-    if len(valid_prices) >= 3: # Need at least 3 prices to establish a fair median
+    if len(valid_prices) >= 3: 
         median_price = valid_prices.median()
         if median_price > 0:
             def fix_outlier(p):
                 if pd.isna(p): return p
-                # If price is wildly high (e.g., missing decimal: 500 instead of 5.00)
                 while p > 10 * median_price:
                     p /= 10
-                # If price is wildly low (e.g., extra decimal: 0.50 instead of 5.00)
                 while p < 0.1 * median_price and p > 0:
                     p *= 10
                 return p
             
             df['Clean_Price'] = df['Clean_Price'].apply(fix_outlier)
     
-    # Step 3: Format perfectly for the final table (No currency symbols)
     def format_price(p):
         if pd.isna(p): 
             return 'N/A'
-        # If it's a clean thousands integer (e.g., 5000 COP), keep it whole.
         if p.is_integer() and p > 100:
             return str(int(p))
-        # Otherwise, force standard two decimal places (e.g., 5.50)
         else:
             return f"{p:.2f}"
             
@@ -267,7 +286,8 @@ if uploaded_files and api_key:
                                 df_chunk['Retailer'] = retailer
                                 df_chunk['City'] = city
                                 
-                                # Apply our new programmatic price standardization!
+                                # Clean data structures programmatically 
+                                df_chunk['Pack_Size'] = df_chunk['Pack_Size'].apply(standardize_pack_size)
                                 df_chunk = standardize_and_fix_prices(df_chunk)
                                 
                                 all_products.append(df_chunk)
@@ -291,10 +311,16 @@ if uploaded_files and api_key:
         if all_products:
             final_df = pd.concat(all_products, ignore_index=True)
             
+            # Rename columns to standard requirements
+            final_df.rename(columns={
+                'Pack_Size': 'Pack_Size_(ml/g)', 
+                'Price': 'Price (local)'
+            }, inplace=True)
+            
             desired_order = [
                 "Image_Name", "Country", "City", "Retailer", "Category", 
                 "Product_Name", "Brand", "Manufacturer", 
-                "Pack_Size", "Quantity", "Price", "Promo", 
+                "Pack_Size_(ml/g)", "Quantity", "Price (local)", "Promo", 
                 "Position", "Facings", "Confidence"
             ]
             
@@ -310,13 +336,3 @@ if uploaded_files and api_key:
             
             csv = final_df.to_csv(index=False).encode('utf-8')
             st.download_button(
-                label="📥 Download Excel/CSV Report",
-                data=csv,
-                file_name="ai_shelf_intelligence_data.csv",
-                mime="text/csv"
-            )
-        else:
-            st.error("❌ No data generated.")
-
-elif uploaded_files and not api_key:
-    st.warning("⚠️ Please enter your API Key in the sidebar or secrets to start.")
