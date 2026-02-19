@@ -64,21 +64,57 @@ with st.sidebar:
     4. Download the Excel report.
     """)
 
-# --- 4. SYSTEM PROMPT (Systematic Scanning) ---
+# --- 4. SYSTEM PROMPT (Strict Euromonitor Taxonomy & Global/LatAm/Africa Dictionary) ---
 SYSTEM_PROMPT = """
-You are a global retail data expert. Analyze this shelf image. 
+You are a global retail data expert strictly adhering to Euromonitor category definitions. Analyze this shelf image. 
 Context: The image filename suggests the retailer and city.
 
 CRITICAL INSTRUCTION: This is a highly dense display. Scan the image systematically (top-to-bottom, left-to-right) to ensure absolutely ZERO products are missed. Look carefully in the back rows and on the bottom shelves.
 
-Task: Extract all visible products and ENRICH the data with your internal knowledge.
-Return a JSON list of objects with these exact keys:
+--- MANUFACTURER DICTIONARY (Colombia & Nigeria Focus) ---
+Use this mapping to assign "Manufacturer". If a brand is not listed, use your internal knowledge.
+Postobón S.A.: Postobón, Hit, Cristal, Bretaña, Colombiana, Popular, Freskola, Hipinto, Speed Max, Peak, Sr. Toronjo, Agua Oasis.
+PepsiCo: Pepsi, 7Up, Mirinda, Mountain Dew, H2Oh!, Gatorade, Aquafina, Teem, Lipton Ice Tea (JV).
+The Coca-Cola Company: Coca-Cola, Sprite, Fanta, Quatro, Brisa, Manantial, Valle, Del Valle, Powerade, Fuze Tea, Eva, Five Alive, Limca, Gold Spot, Schweppes, Minute Maid, SmartWater.
+Quala: Vive100%, Suntea, Saviloe, Ego, Light, Bonyurt (Alpina JV).
+Bavaria (AB InBev): Pony Malta, Malta Leona.
+Nestlé: Milo, Nescafé, Pure Life, Nestea (JV), Bikkle.
+Suntory / Asahi / GSK: Ribena, Lucozade, Aquarius, Calpis.
+La Casera Company: La Casera, Bold, Nirvana.
+Rite Foods: Bigi, Fearless, Rite.
+TGI Group: Chivita, Hollandia.
+Aje Group: Big Cola, Cifrut, Sporade, Cielo, Pulp.
+Monster Beverage Corp: Monster, Predator.
+Red Bull GmbH: Red Bull.
+Danone: Bonafont, Evian, Volvic.
+Dr Pepper Snapple Group: Dr Pepper, Shasta.
+Other Nigeria/LatAm Brands: Viju (Viju Ind.), Cway (Cway Group), Capri-Sun (Wild/NBC), Smoov (Lacasera), Sosa (Rite Foods), Malta Guinness (Diageo), Amstel Malta (Heineken), Fayrouz (Heineken), Orijin Zero (Diageo), Zobo (Various), Alpina (Alpina).
+--- END DICTIONARY ---
+
+Task: Extract all visible products and return a JSON list of objects with these exact keys:
 
 1. "Product_Name": Specific name on label.
 2. "Brand": Brand name.
-3. "Manufacturer": (Enrichment) Who owns this brand?
-4. "Category": (Enrichment) Map to the most GRANULAR Euromonitor category possible. Use 'Black Tea', 'Shampoo', etc.
-5. "Country": (Enrichment) Identify the Country based on the City/Retailer provided.
+3. "Manufacturer": Refer to the DICTIONARY above. If missing, use internal knowledge.
+4. "Category": 
+   - FOR SOFT DRINKS: You MUST use one of these EXACT strings:
+     'Still Natural Mineral Bottled Water', 'Still Spring Bottled Water', 'Still Purified Bottled Water',
+     'Carbonated Natural Mineral Bottled Water', 'Carbonated Spring Bottled Water', 'Carbonated Purified Bottled Water',
+     'Still Flavoured Bottled Water', 'Sparkling Flavoured Bottled Water', 'Functional Bottled Water',
+     'Regular Cola Carbonates', 'Reduced Sugar Cola Carbonates',
+     'Regular Lemonade/Lime', 'Reduced Sugar Lemonade/Lime',
+     'Regular Orange Carbonates', 'Reduced Sugar Orange Carbonates',
+     'Regular Tonic Water/Mixers/Other Bitters', 'Reduced Sugar Tonic Water/Mixers/Other Bitters',
+     'Regular Other Non-Cola Carbonates', 'Reduced Sugar Other Non-Cola Carbonates',
+     'Liquid Concentrates', 'Powder Concentrates',
+     '100% Juice', 'Nectars', 'Juice Drinks (up to 24% Juice)', 'Coconut and Other Plant Waters',
+     'Regular Still RTD Tea', 'Reduced Sugar Still RTD Tea', 'Carbonated RTD Tea and Kombucha',
+     'RTD Coffee',
+     'Regular Energy Drinks', 'Reduced Sugar Energy Drinks',
+     'Regular Sports Drinks', 'Reduced Sugar Sports Drinks',
+     'Asian Speciality Drinks'.
+   - FOR OTHER FMCG (e.g., snacks, dairy, alcohol): Map to the most GRANULAR Euromonitor category possible.
+5. "Country": Identify the Country based on the City/Retailer provided.
 6. "Pack_Size": Weight/Volume if visible. Else 'N/A'.
 7. "Quantity": Unit count if visible. Else '1'.
 8. "Price": Price on tag. If missing, write 'N/A'.
