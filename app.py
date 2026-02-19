@@ -136,7 +136,9 @@ if uploaded_files and api_key:
     if st.button(f"Start Audit ({len(uploaded_files)} Images)"):
         
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-flash-latest')
+        
+        # --- THE FIX: Switched to Gemini 1.5 Flash for the higher free-tier quota ---
+        model = genai.GenerativeModel('gemini-1.5-flash')
         
         all_products = []
         progress_bar = st.progress(0)
