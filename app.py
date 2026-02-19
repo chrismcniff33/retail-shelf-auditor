@@ -51,10 +51,13 @@ with st.sidebar:
     
     st.divider()
     st.subheader("💰 Cost & Usage")
+    
+    # --- UPDATED SIDEBAR INFO ---
     st.info("""
-    **Free Tier:** ~15 images / minute.
-    **Paid Tier:** ~$0.35 per 1,000 images.
+    **Free Tier:** 1,000 image files per day.
+    **Paid Tier:** $0.35 per 1,000 image files.
     """)
+    
     st.divider()
     st.write("### 📝 Instructions")
     st.markdown("""
@@ -137,8 +140,8 @@ if uploaded_files and api_key:
         
         genai.configure(api_key=api_key)
         
-        # --- THE FIX: Switched to Gemini 1.5 Flash for the higher free-tier quota ---
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # --- STABLE PRODUCTION MODEL ---
+        model = genai.GenerativeModel('gemini-2.0-flash')
         
         all_products = []
         progress_bar = st.progress(0)
@@ -158,14 +161,13 @@ if uploaded_files and api_key:
                 
                 if image_bytes:
                     # 3. AI Call with NATIVE JSON MODE
-                    # This forces the AI to output pure JSON, skipping conversational filler
                     response = model.generate_content(
                         [SYSTEM_PROMPT + f"\nContext: This store is in {city}, {retailer}.",
                          {"mime_type": "image/jpeg", "data": image_bytes}],
                         generation_config={"response_mime_type": "application/json"}
                     )
                     
-                    # 4. Direct JSON Parsing (No messy text cleaning required!)
+                    # 4. Direct JSON Parsing
                     if response.text:
                         try:
                             df_chunk = pd.read_json(io.StringIO(response.text))
@@ -182,7 +184,7 @@ if uploaded_files and api_key:
                         except ValueError:
                             st.warning(f"⚠️ AI returned invalid data structure for {file.name}.")
                 
-                # Brief safety delay to prevent free-tier API blocking
+                # Brief safety delay to prevent API blocking
                 time.sleep(2) 
                 
             except Exception as e:
