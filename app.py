@@ -5,6 +5,7 @@ from PIL import Image
 import time
 import io
 import hmac
+import re
 
 # --- 1. PAGE CONFIGURATION ---
 st.set_page_config(page_title="AI Shelf Intelligence", page_icon="🔍", layout="wide")
@@ -51,7 +52,6 @@ with st.sidebar:
     
     st.divider()
     
-    # --- CLEAN COST INFO ---
     st.subheader("💰 Cost & Usage")
     st.info("Approx. $0.35 per 1,000 image files processed.")
     
@@ -64,7 +64,7 @@ with st.sidebar:
     4. Download the Excel report.
     """)
 
-# --- 4. SYSTEM PROMPT (Strict Euromonitor Taxonomy & Global/LatAm/Africa Dictionary) ---
+# --- 4. SYSTEM PROMPT ---
 SYSTEM_PROMPT = """
 You are a global retail data expert strictly adhering to Euromonitor category definitions. Analyze this shelf image. 
 Context: The image filename suggests the retailer and city.
@@ -113,15 +113,15 @@ Task: Extract all visible products and return a JSON list of objects with these 
      'Regular Energy Drinks', 'Reduced Sugar Energy Drinks',
      'Regular Sports Drinks', 'Reduced Sugar Sports Drinks',
      'Asian Speciality Drinks'.
-   - FOR OTHER FMCG (e.g., snacks, dairy, alcohol): Map to the most GRANULAR Euromonitor category possible.
+   - FOR OTHER FMCG: Map to the most GRANULAR Euromonitor category possible.
 5. "Country": Identify the Country based on the City/Retailer provided.
-6. "Pack_Size": Weight/Volume if visible. Else 'N/A'.
+6. "Pack_Size": Weight/Volume (e.g., '330ml', '500ml', '1.5L'). If OCR is unreadable, ESTIMATE volume using visual spatial reasoning (aspect ratio, relative height to shelf). 
 7. "Quantity": Unit count if visible. Else '1'.
-8. "Price": Price on tag. If missing, write 'N/A'.
+8. "Price": Price on tag. Write numbers only if possible. If missing, write 'N/A'.
 9. "Promo": Description of any promo tag. If none, write ''.
 10. "Position": Shelf level (Top/Middle/Bottom).
 11. "Facings": Integer count of identical items side-by-side.
-12. "Confidence": 'High' if text is clear, 'Low' if blurry or obstructed.
+12. "Confidence": 'High' if text is clearly readable, 'Low' if blurry or if Pack_Size was visually estimated.
 """
 
 # --- 5. HELPER FUNCTIONS ---
@@ -141,19 +141,81 @@ def highlight_low_confidence(row):
         return ['background-color: #fff3cd'] * len(row)
     return [''] * len(row)
 
+def standardize_and_fix_prices(df):
+    """Cleans currency formatting and auto-corrects decimal OCR errors based on local median."""
+    if 'Price' not in df.columns:
+        return df
+        
+    def extract_number(val):
+        s = str(val).strip()
+        if s.upper() in ['N/A', 'NAN', 'NONE', '']: 
+            return None
+        # Remove anything that isn't a digit, comma, or decimal
+        s = re.sub(r'[^\d.,]', '', s)
+        if not s: 
+            return None
+        
+        # Handle European (1.200,50) vs US (1,200.50) formatting
+        if ',' in s and '.' in s:
+            if s.rfind(',') > s.rfind('.'):
+                s = s.replace('.', '').replace(',', '.')
+            else:
+                s = s.replace(',', '')
+        elif ',' in s:
+            # If a comma is followed by exactly 2 digits, it's likely a decimal (e.g., 1,50)
+            if re.search(r',\d{2}$', s):
+                s = s.replace(',', '.')
+            else:
+                s = s.replace(',', '')
+                
+        try:
+            return float(s)
+        except ValueError:
+            return None
+
+    # Step 1: Clean raw strings into floats
+    df['Clean_Price'] = df['Price'].apply(extract_number)
+    
+    # Step 2: Auto-correct outliers by shifting the decimal point
+    valid_prices = df['Clean_Price'].dropna()
+    if len(valid_prices) >= 3: # Need at least 3 prices to establish a fair median
+        median_price = valid_prices.median()
+        if median_price > 0:
+            def fix_outlier(p):
+                if pd.isna(p): return p
+                # If price is wildly high (e.g., missing decimal: 500 instead of 5.00)
+                while p > 10 * median_price:
+                    p /= 10
+                # If price is wildly low (e.g., extra decimal: 0.50 instead of 5.00)
+                while p < 0.1 * median_price and p > 0:
+                    p *= 10
+                return p
+            
+            df['Clean_Price'] = df['Clean_Price'].apply(fix_outlier)
+    
+    # Step 3: Format perfectly for the final table (No currency symbols)
+    def format_price(p):
+        if pd.isna(p): 
+            return 'N/A'
+        # If it's a clean thousands integer (e.g., 5000 COP), keep it whole.
+        if p.is_integer() and p > 100:
+            return str(int(p))
+        # Otherwise, force standard two decimal places (e.g., 5.50)
+        else:
+            return f"{p:.2f}"
+            
+    df['Price'] = df['Clean_Price'].apply(format_price)
+    df = df.drop(columns=['Clean_Price'])
+    return df
+
 # --- 6. HIGH-DEFINITION IMAGE PROCESSOR ---
 def prepare_image(uploaded_file):
-    """
-    Resizes to 2500px max. 
-    This perfectly balances text readability for dense shelves with API stability.
-    """
     try:
         image = Image.open(uploaded_file)
         if image.mode != 'RGB':
             image = image.convert('RGB')
         
         image.thumbnail((2500, 2500))
-            
         img_byte_arr = io.BytesIO()
         image.save(img_byte_arr, format='JPEG', quality=95)
         return img_byte_arr.getvalue()
@@ -165,10 +227,9 @@ st.title("🔍 AI Shelf Intelligence")
 
 uploaded_files = st.file_uploader("Upload Shelf Images (Max 100)", accept_multiple_files=True)
 
-# 100-IMAGE HARD LIMIT CHECK
 if uploaded_files:
     if len(uploaded_files) > 100:
-        st.error(f"🛑 **Upload Limit Exceeded!** You uploaded {len(uploaded_files)} images. Please upload a maximum of 100 images at a time to ensure optimal processing.")
+        st.error(f"🛑 **Upload Limit Exceeded!** You uploaded {len(uploaded_files)} images. Please upload a maximum of 100 images at a time.")
         st.stop()
 
 if uploaded_files and api_key:
@@ -191,7 +252,6 @@ if uploaded_files and api_key:
                 image_bytes = prepare_image(file)
                 
                 if image_bytes:
-                    # NATIVE JSON MODE
                     response = model.generate_content(
                         [SYSTEM_PROMPT + f"\nContext: This store is in {city}, {retailer}.",
                          {"mime_type": "image/jpeg", "data": image_bytes}],
@@ -206,18 +266,21 @@ if uploaded_files and api_key:
                                 df_chunk['Image_Name'] = file.name
                                 df_chunk['Retailer'] = retailer
                                 df_chunk['City'] = city
+                                
+                                # Apply our new programmatic price standardization!
+                                df_chunk = standardize_and_fix_prices(df_chunk)
+                                
                                 all_products.append(df_chunk)
                             else:
                                 st.warning(f"⚠️ No products found in {file.name}.")
                         except ValueError:
                             st.warning(f"⚠️ AI returned invalid data structure for {file.name}.")
                 
-                time.sleep(1) # Safe delay to prevent spamming the API
+                time.sleep(1) 
                 
             except Exception as e:
-                # Catching your Google Cloud Hard Cap Limit
                 if "429" in str(e) or "Quota" in str(e):
-                    st.error("🛑 **API Limit Reached!** Your Google Cloud budget cap has been hit mid-batch. No further images can be processed this month.")
+                    st.error("🛑 **API Limit Reached!** Your Google Cloud budget cap has been hit mid-batch.")
                     st.stop()
                 else:
                     st.error(f"❌ Skipped {file.name} due to error: {e}")
@@ -253,7 +316,7 @@ if uploaded_files and api_key:
                 mime="text/csv"
             )
         else:
-            st.error("❌ No data generated. Please check your API Key or Image Quality.")
+            st.error("❌ No data generated.")
 
 elif uploaded_files and not api_key:
     st.warning("⚠️ Please enter your API Key in the sidebar or secrets to start.")
