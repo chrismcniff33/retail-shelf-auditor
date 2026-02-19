@@ -5,6 +5,9 @@ from PIL import Image
 import time
 import io
 import hmac
+import os
+import json
+from datetime import datetime
 
 # --- 1. PAGE CONFIGURATION ---
 st.set_page_config(page_title="AI Shelf Intelligence", page_icon="🔍", layout="wide")
@@ -38,7 +41,34 @@ def check_password():
 if not check_password():
     st.stop()
 
-# --- 3. SIDEBAR & API SETUP ---
+# --- 3. LOCAL BUDGET TRACKER (Hidden Failsafe) ---
+BUDGET_FILE = "budget_tracker.json"
+MONTHLY_BUDGET = 1.00
+COST_PER_IMAGE = 0.00035
+MAX_IMAGES = int(MONTHLY_BUDGET / COST_PER_IMAGE)
+
+def load_budget_usage():
+    """Loads the estimated spend for the current month."""
+    current_month = datetime.now().strftime("%Y-%m")
+    if os.path.exists(BUDGET_FILE):
+        try:
+            with open(BUDGET_FILE, "r") as f:
+                data = json.load(f)
+                if data.get("month") == current_month:
+                    return data.get("images_processed", 0)
+        except:
+            pass
+    return 0
+
+def save_budget_usage(image_count):
+    """Saves the updated image count to calculate spend."""
+    current_month = datetime.now().strftime("%Y-%m")
+    with open(BUDGET_FILE, "w") as f:
+        json.dump({"month": current_month, "images_processed": image_count}, f)
+
+processed_images = load_budget_usage()
+
+# --- 4. SIDEBAR & API SETUP ---
 with st.sidebar:
     st.header("⚙️ Settings")
     if 'GOOGLE_API_KEY' in st.secrets:
@@ -50,13 +80,10 @@ with st.sidebar:
             st.warning("Please enter your API Key to proceed.")
     
     st.divider()
-    st.subheader("💰 Cost & Usage")
     
-    # --- UPDATED SIDEBAR INFO ---
-    st.info("""
-    **Free Tier:** 1,000 image files per day.
-    **Paid Tier:** $0.35 per 1,000 image files.
-    """)
+    # --- CLEAN BUDGET INFO ---
+    st.subheader("💰 Cost & Usage")
+    st.info("Approx. $0.35 per 1,000 image files processed.")
     
     st.divider()
     st.write("### 📝 Instructions")
@@ -67,7 +94,7 @@ with st.sidebar:
     4. Download the Excel report.
     """)
 
-# --- 4. SYSTEM PROMPT ---
+# --- 5. SYSTEM PROMPT ---
 SYSTEM_PROMPT = """
 You are a global retail data expert. Analyze this shelf image. 
 Context: The image filename suggests the retailer and city.
@@ -77,21 +104,19 @@ Return a JSON list of objects with these exact keys:
 
 1. "Product_Name": Specific name on label.
 2. "Brand": Brand name.
-3. "Manufacturer": (Enrichment) Who owns this brand? (e.g., for Twinings write 'Associated British Foods').
-4. "Category": (Enrichment) Map to the most GRANULAR Euromonitor category possible. 
-   - Do NOT use high-level aggregations like 'Hot Drinks'. Use 'Black Tea', 'Green Tea', 'Instant Coffee'.
-5. "Country": (Enrichment) Identify the Country based on the City/Retailer provided in context OR the language on the packaging.
-   - Example: If City is 'Bogota', Country is 'Colombia'.
-6. "Pack_Size": Weight/Volume if visible (e.g., '500g', '1L'). Else 'N/A'.
-7. "Quantity": Unit count if visible (e.g., '160 bags'). Else '1'.
+3. "Manufacturer": (Enrichment) Who owns this brand?
+4. "Category": (Enrichment) Map to the most GRANULAR Euromonitor category possible. Use 'Black Tea', 'Shampoo', etc.
+5. "Country": (Enrichment) Identify the Country based on the City/Retailer provided.
+6. "Pack_Size": Weight/Volume if visible. Else 'N/A'.
+7. "Quantity": Unit count if visible. Else '1'.
 8. "Price": Price on tag. If missing, write 'N/A'.
-9. "Promo": Description of any yellow/red promo tag. If none, write ''.
+9. "Promo": Description of any promo tag. If none, write ''.
 10. "Position": Shelf level (Top/Middle/Bottom).
 11. "Facings": Integer count of identical items side-by-side.
 12. "Confidence": 'High' if text is clear, 'Low' if blurry or obstructed.
 """
 
-# --- 5. HELPER FUNCTIONS ---
+# --- 6. HELPER FUNCTIONS ---
 def parse_filename(filename):
     try:
         name = filename.rsplit('.', 1)[0]
@@ -108,30 +133,29 @@ def highlight_low_confidence(row):
         return ['background-color: #fff3cd'] * len(row)
     return [''] * len(row)
 
-# --- 6. HIGH-SPEED IMAGE PROCESSOR ---
+# --- 7. EFFICIENCY STEP 1: HIGH-SPEED IMAGE PROCESSOR ---
 def prepare_image(uploaded_file):
-    """
-    Standardizes image to RGB and ALWAYS resizes to max 1600px.
-    This preserves text readability but drastically speeds up AI processing and prevents 500 errors.
-    """
+    """ALWAYS resizes to 1600px. Maximizes speed and minimizes token cost."""
     try:
         image = Image.open(uploaded_file)
         if image.mode != 'RGB':
             image = image.convert('RGB')
         
-        # The 1600px Speed Hack
         image.thumbnail((1600, 1600))
             
         img_byte_arr = io.BytesIO()
-        # Quality 85 reduces upload payload size without affecting AI vision
         image.save(img_byte_arr, format='JPEG', quality=85)
         return img_byte_arr.getvalue()
     except Exception as e:
         return None
 
-# --- 7. MAIN APP LOGIC ---
+# --- 8. MAIN APP LOGIC ---
 st.title("🔍 AI Shelf Intelligence")
-st.markdown("Use AI to generate structured data tables that provide insight into shelf dynamics across key retailers and channels globally")
+
+# LOCAL HARD STOP (Checks if local memory remembers hitting the limit)
+if processed_images >= MAX_IMAGES:
+    st.error("🛑 **Monthly API Spend Limit Reached!** You have hit the $1.00 budget cap for this month. The app will resume on the 1st of next month.")
+    st.stop()
 
 uploaded_files = st.file_uploader("Upload Shelf Images", accept_multiple_files=True)
 
@@ -139,8 +163,6 @@ if uploaded_files and api_key:
     if st.button(f"Start Audit ({len(uploaded_files)} Images)"):
         
         genai.configure(api_key=api_key)
-        
-        # --- STABLE PRODUCTION MODEL ---
         model = genai.GenerativeModel('gemini-2.0-flash')
         
         all_products = []
@@ -153,46 +175,47 @@ if uploaded_files and api_key:
             status_text.write(f"Analyzing {i+1}/{total_files}: **{file.name}**")
             
             try:
-                # 1. Metadata
                 retailer, city = parse_filename(file.name)
-                
-                # 2. Fast Image Processing
                 image_bytes = prepare_image(file)
                 
                 if image_bytes:
-                    # 3. AI Call with NATIVE JSON MODE
+                    # EFFICIENCY STEP 2: NATIVE JSON MODE
                     response = model.generate_content(
                         [SYSTEM_PROMPT + f"\nContext: This store is in {city}, {retailer}.",
                          {"mime_type": "image/jpeg", "data": image_bytes}],
                         generation_config={"response_mime_type": "application/json"}
                     )
                     
-                    # 4. Direct JSON Parsing
                     if response.text:
+                        processed_images += 1
+                        save_budget_usage(processed_images)
+                        
                         try:
                             df_chunk = pd.read_json(io.StringIO(response.text))
                             
                             if not df_chunk.empty:
-                                # Add Contextual Metadata
                                 df_chunk['Image_Name'] = file.name
                                 df_chunk['Retailer'] = retailer
                                 df_chunk['City'] = city
-                                
                                 all_products.append(df_chunk)
                             else:
                                 st.warning(f"⚠️ No products found in {file.name}.")
                         except ValueError:
                             st.warning(f"⚠️ AI returned invalid data structure for {file.name}.")
                 
-                # Brief safety delay to prevent API blocking
-                time.sleep(2) 
+                time.sleep(1) # Safe delay for paid tier
                 
             except Exception as e:
-                st.error(f"❌ Skipped {file.name} due to error: {e}")
+                # GOOGLE CLOUD HARD STOP (Catches the 429 API block from your Google Console quota limit)
+                if "429" in str(e) or "Quota" in str(e):
+                    st.error("🛑 **API Limit Reached!** Your Google Cloud hard cap has been hit mid-batch. No further images can be processed this month.")
+                    st.stop()
+                else:
+                    st.error(f"❌ Skipped {file.name} due to error: {e}")
             
             progress_bar.progress((i + 1) / total_files)
             
-        # --- 8. FINAL TABLE ---
+        # --- 9. FINAL TABLE ---
         if all_products:
             final_df = pd.concat(all_products, ignore_index=True)
             
@@ -203,7 +226,6 @@ if uploaded_files and api_key:
                 "Position", "Facings", "Confidence"
             ]
             
-            # Ensure all columns exist even if AI missed one
             for col in desired_order:
                 if col not in final_df.columns:
                     final_df[col] = ""
