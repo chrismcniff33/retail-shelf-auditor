@@ -336,3 +336,13 @@ if uploaded_files and api_key:
             
             csv = final_df.to_csv(index=False).encode('utf-8')
             st.download_button(
+                label="📥 Download Excel/CSV Report",
+                data=csv,
+                file_name="ai_shelf_intelligence_data.csv",
+                mime="text/csv"
+            )
+        else:
+            st.error("❌ No data generated.")
+
+elif uploaded_files and not api_key:
+    st.warning("⚠️ Please enter your API Key in the sidebar or secrets to start.")
