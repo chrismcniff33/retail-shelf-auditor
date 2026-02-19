@@ -65,7 +65,6 @@ with st.sidebar:
     """)
 
 # --- 4. SYSTEM PROMPT ---
-# Note: Removed "Do not use markdown" instruction because Native JSON mode handles it automatically.
 SYSTEM_PROMPT = """
 You are a global retail data expert. Analyze this shelf image. 
 Context: The image filename suggests the retailer and city.
@@ -86,4 +85,140 @@ Return a JSON list of objects with these exact keys:
 9. "Promo": Description of any yellow/red promo tag. If none, write ''.
 10. "Position": Shelf level (Top/Middle/Bottom).
 11. "Facings": Integer count of identical items side-by-side.
-12. "Confidence": 'High' if text is clear, 'Low' if blurry or
+12. "Confidence": 'High' if text is clear, 'Low' if blurry or obstructed.
+"""
+
+# --- 5. HELPER FUNCTIONS ---
+def parse_filename(filename):
+    try:
+        name = filename.rsplit('.', 1)[0]
+        parts = name.split('-')
+        retailer = parts[0] if len(parts) > 0 else "Unknown"
+        city = parts[1] if len(parts) > 1 else "Unknown"
+        return retailer, city
+    except:
+        return "Unknown", "Unknown"
+
+def highlight_low_confidence(row):
+    val = row.get('Confidence', '')
+    if isinstance(val, str) and val.lower() == 'low':
+        return ['background-color: #fff3cd'] * len(row)
+    return [''] * len(row)
+
+# --- 6. HIGH-SPEED IMAGE PROCESSOR ---
+def prepare_image(uploaded_file):
+    """
+    Standardizes image to RGB and ALWAYS resizes to max 1600px.
+    This preserves text readability but drastically speeds up AI processing and prevents 500 errors.
+    """
+    try:
+        image = Image.open(uploaded_file)
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        
+        # The 1600px Speed Hack
+        image.thumbnail((1600, 1600))
+            
+        img_byte_arr = io.BytesIO()
+        # Quality 85 reduces upload payload size without affecting AI vision
+        image.save(img_byte_arr, format='JPEG', quality=85)
+        return img_byte_arr.getvalue()
+    except Exception as e:
+        return None
+
+# --- 7. MAIN APP LOGIC ---
+st.title("🔍 AI Shelf Intelligence")
+st.markdown("Use AI to generate structured data tables that provide insight into shelf dynamics across key retailers and channels globally")
+
+uploaded_files = st.file_uploader("Upload Shelf Images", accept_multiple_files=True)
+
+if uploaded_files and api_key:
+    if st.button(f"Start Audit ({len(uploaded_files)} Images)"):
+        
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-flash-latest')
+        
+        all_products = []
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        total_files = len(uploaded_files)
+        
+        for i, file in enumerate(uploaded_files):
+            status_text.write(f"Analyzing {i+1}/{total_files}: **{file.name}**")
+            
+            try:
+                # 1. Metadata
+                retailer, city = parse_filename(file.name)
+                
+                # 2. Fast Image Processing
+                image_bytes = prepare_image(file)
+                
+                if image_bytes:
+                    # 3. AI Call with NATIVE JSON MODE
+                    # This forces the AI to output pure JSON, skipping conversational filler
+                    response = model.generate_content(
+                        [SYSTEM_PROMPT + f"\nContext: This store is in {city}, {retailer}.",
+                         {"mime_type": "image/jpeg", "data": image_bytes}],
+                        generation_config={"response_mime_type": "application/json"}
+                    )
+                    
+                    # 4. Direct JSON Parsing (No messy text cleaning required!)
+                    if response.text:
+                        try:
+                            df_chunk = pd.read_json(io.StringIO(response.text))
+                            
+                            if not df_chunk.empty:
+                                # Add Contextual Metadata
+                                df_chunk['Image_Name'] = file.name
+                                df_chunk['Retailer'] = retailer
+                                df_chunk['City'] = city
+                                
+                                all_products.append(df_chunk)
+                            else:
+                                st.warning(f"⚠️ No products found in {file.name}.")
+                        except ValueError:
+                            st.warning(f"⚠️ AI returned invalid data structure for {file.name}.")
+                
+                # Brief safety delay to prevent free-tier API blocking
+                time.sleep(2) 
+                
+            except Exception as e:
+                st.error(f"❌ Skipped {file.name} due to error: {e}")
+            
+            progress_bar.progress((i + 1) / total_files)
+            
+        # --- 8. FINAL TABLE ---
+        if all_products:
+            final_df = pd.concat(all_products, ignore_index=True)
+            
+            desired_order = [
+                "Image_Name", "Country", "City", "Retailer", "Category", 
+                "Product_Name", "Brand", "Manufacturer", 
+                "Pack_Size", "Quantity", "Price", "Promo", 
+                "Position", "Facings", "Confidence"
+            ]
+            
+            # Ensure all columns exist even if AI missed one
+            for col in desired_order:
+                if col not in final_df.columns:
+                    final_df[col] = ""
+            
+            final_df = final_df[desired_order]
+            
+            st.success("✅ Audit Complete!")
+            st.write("### 📊 Audit Data Preview")
+            st.dataframe(final_df.style.apply(highlight_low_confidence, axis=1))
+            
+            csv = final_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download Excel/CSV Report",
+                data=csv,
+                file_name="ai_shelf_intelligence_data.csv",
+                mime="text/csv"
+            )
+        else:
+            st.error("❌ No data generated. Please check your API Key or Image Quality.")
+
+elif uploaded_files and not api_key:
+    st.warning("⚠️ Please enter your API Key in the sidebar or secrets to start.")
