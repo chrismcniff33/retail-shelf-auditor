@@ -5,9 +5,6 @@ from PIL import Image
 import time
 import io
 import hmac
-import os
-import json
-from datetime import datetime
 
 # --- 1. PAGE CONFIGURATION ---
 st.set_page_config(page_title="AI Shelf Intelligence", page_icon="🔍", layout="wide")
@@ -41,34 +38,7 @@ def check_password():
 if not check_password():
     st.stop()
 
-# --- 3. LOCAL BUDGET TRACKER (Hidden Failsafe) ---
-BUDGET_FILE = "budget_tracker.json"
-MONTHLY_BUDGET = 1.00
-COST_PER_IMAGE = 0.00035
-MAX_IMAGES = int(MONTHLY_BUDGET / COST_PER_IMAGE)
-
-def load_budget_usage():
-    """Loads the estimated spend for the current month."""
-    current_month = datetime.now().strftime("%Y-%m")
-    if os.path.exists(BUDGET_FILE):
-        try:
-            with open(BUDGET_FILE, "r") as f:
-                data = json.load(f)
-                if data.get("month") == current_month:
-                    return data.get("images_processed", 0)
-        except:
-            pass
-    return 0
-
-def save_budget_usage(image_count):
-    """Saves the updated image count to calculate spend."""
-    current_month = datetime.now().strftime("%Y-%m")
-    with open(BUDGET_FILE, "w") as f:
-        json.dump({"month": current_month, "images_processed": image_count}, f)
-
-processed_images = load_budget_usage()
-
-# --- 4. SIDEBAR & API SETUP ---
+# --- 3. SIDEBAR & API SETUP ---
 with st.sidebar:
     st.header("⚙️ Settings")
     if 'GOOGLE_API_KEY' in st.secrets:
@@ -81,7 +51,7 @@ with st.sidebar:
     
     st.divider()
     
-    # --- CLEAN BUDGET INFO ---
+    # --- CLEAN COST INFO ---
     st.subheader("💰 Cost & Usage")
     st.info("Approx. $0.35 per 1,000 image files processed.")
     
@@ -94,10 +64,12 @@ with st.sidebar:
     4. Download the Excel report.
     """)
 
-# --- 5. SYSTEM PROMPT ---
+# --- 4. SYSTEM PROMPT (Systematic Scanning) ---
 SYSTEM_PROMPT = """
 You are a global retail data expert. Analyze this shelf image. 
 Context: The image filename suggests the retailer and city.
+
+CRITICAL INSTRUCTION: This is a highly dense display. Scan the image systematically (top-to-bottom, left-to-right) to ensure absolutely ZERO products are missed. Look carefully in the back rows and on the bottom shelves.
 
 Task: Extract all visible products and ENRICH the data with your internal knowledge.
 Return a JSON list of objects with these exact keys:
@@ -116,7 +88,7 @@ Return a JSON list of objects with these exact keys:
 12. "Confidence": 'High' if text is clear, 'Low' if blurry or obstructed.
 """
 
-# --- 6. HELPER FUNCTIONS ---
+# --- 5. HELPER FUNCTIONS ---
 def parse_filename(filename):
     try:
         name = filename.rsplit('.', 1)[0]
@@ -133,31 +105,35 @@ def highlight_low_confidence(row):
         return ['background-color: #fff3cd'] * len(row)
     return [''] * len(row)
 
-# --- 7. EFFICIENCY STEP 1: HIGH-SPEED IMAGE PROCESSOR ---
+# --- 6. HIGH-DEFINITION IMAGE PROCESSOR ---
 def prepare_image(uploaded_file):
-    """ALWAYS resizes to 1600px. Maximizes speed and minimizes token cost."""
+    """
+    Resizes to 2500px max. 
+    This perfectly balances text readability for dense shelves with API stability.
+    """
     try:
         image = Image.open(uploaded_file)
         if image.mode != 'RGB':
             image = image.convert('RGB')
         
-        image.thumbnail((1600, 1600))
+        image.thumbnail((2500, 2500))
             
         img_byte_arr = io.BytesIO()
-        image.save(img_byte_arr, format='JPEG', quality=85)
+        image.save(img_byte_arr, format='JPEG', quality=95)
         return img_byte_arr.getvalue()
     except Exception as e:
         return None
 
-# --- 8. MAIN APP LOGIC ---
+# --- 7. MAIN APP LOGIC ---
 st.title("🔍 AI Shelf Intelligence")
 
-# LOCAL HARD STOP (Checks if local memory remembers hitting the limit)
-if processed_images >= MAX_IMAGES:
-    st.error("🛑 **Monthly API Spend Limit Reached!** You have hit the $1.00 budget cap for this month. The app will resume on the 1st of next month.")
-    st.stop()
+uploaded_files = st.file_uploader("Upload Shelf Images (Max 100)", accept_multiple_files=True)
 
-uploaded_files = st.file_uploader("Upload Shelf Images", accept_multiple_files=True)
+# 100-IMAGE HARD LIMIT CHECK
+if uploaded_files:
+    if len(uploaded_files) > 100:
+        st.error(f"🛑 **Upload Limit Exceeded!** You uploaded {len(uploaded_files)} images. Please upload a maximum of 100 images at a time to ensure optimal processing.")
+        st.stop()
 
 if uploaded_files and api_key:
     if st.button(f"Start Audit ({len(uploaded_files)} Images)"):
@@ -179,7 +155,7 @@ if uploaded_files and api_key:
                 image_bytes = prepare_image(file)
                 
                 if image_bytes:
-                    # EFFICIENCY STEP 2: NATIVE JSON MODE
+                    # NATIVE JSON MODE
                     response = model.generate_content(
                         [SYSTEM_PROMPT + f"\nContext: This store is in {city}, {retailer}.",
                          {"mime_type": "image/jpeg", "data": image_bytes}],
@@ -187,9 +163,6 @@ if uploaded_files and api_key:
                     )
                     
                     if response.text:
-                        processed_images += 1
-                        save_budget_usage(processed_images)
-                        
                         try:
                             df_chunk = pd.read_json(io.StringIO(response.text))
                             
@@ -203,19 +176,19 @@ if uploaded_files and api_key:
                         except ValueError:
                             st.warning(f"⚠️ AI returned invalid data structure for {file.name}.")
                 
-                time.sleep(1) # Safe delay for paid tier
+                time.sleep(1) # Safe delay to prevent spamming the API
                 
             except Exception as e:
-                # GOOGLE CLOUD HARD STOP (Catches the 429 API block from your Google Console quota limit)
+                # Catching your Google Cloud Hard Cap Limit
                 if "429" in str(e) or "Quota" in str(e):
-                    st.error("🛑 **API Limit Reached!** Your Google Cloud hard cap has been hit mid-batch. No further images can be processed this month.")
+                    st.error("🛑 **API Limit Reached!** Your Google Cloud budget cap has been hit mid-batch. No further images can be processed this month.")
                     st.stop()
                 else:
                     st.error(f"❌ Skipped {file.name} due to error: {e}")
             
             progress_bar.progress((i + 1) / total_files)
             
-        # --- 9. FINAL TABLE ---
+        # --- 8. FINAL TABLE ---
         if all_products:
             final_df = pd.concat(all_products, ignore_index=True)
             
