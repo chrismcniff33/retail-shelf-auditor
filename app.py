@@ -223,8 +223,6 @@ def prepare_image(uploaded_file):
             if image.mode != 'RGB':
                 image = image.convert('RGB')
             
-            # OPTIMIZATION: Reduced from 2500px to 2048px. 
-            # This is the 2K sweet spot for AI Vision models, drastically reducing timeouts while preserving OCR text quality.
             image.thumbnail((2048, 2048))
             img_byte_arr = io.BytesIO()
             image.save(img_byte_arr, format='JPEG', quality=95)
@@ -290,14 +288,15 @@ if uploaded_files:
                         
                         if image_bytes:
                             # OPTIMIZATION: 
-                            # 1. Temperature changed to 0.1 to prevent "cognitive looping" on ambiguous pixels.
-                            # 2. Timeout massively increased to 600s (10 minutes) so the client never hangs up early.
+                            # Set temperature to 0.4. This is the perfect middle ground between the 
+                            # default (1.0) and rigid (0.0). It will be fast, skip unreadable smudges, 
+                            # but remain highly accurate to the taxonomy.
                             response = model.generate_content(
                                 [SYSTEM_PROMPT + f"\nContext: This store is in {city}, {retailer}.",
                                  {"mime_type": "image/jpeg", "data": image_bytes}],
                                 generation_config={
                                     "response_mime_type": "application/json",
-                                    "temperature": 0.1,
+                                    "temperature": 0.4,
                                     "max_output_tokens": 8192
                                 },
                                 request_options={"timeout": 600} 
