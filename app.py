@@ -6,6 +6,7 @@ import time
 import io
 import hmac
 import re
+import json
 
 # --- 1. PAGE CONFIGURATION ---
 st.set_page_config(page_title="AI Shelf Intelligence", page_icon="🔍", layout="wide")
@@ -53,7 +54,7 @@ with st.sidebar:
     st.divider()
     
     st.subheader("💰 Cost & Usage")
-    st.info("Approx. £0.30 per 1,000 image files processed.")
+    st.info("Approx. $0.35 per 1,000 image files processed.")
     
     st.divider()
     st.write("### 📝 Instructions")
@@ -259,9 +260,10 @@ if uploaded_files and api_key:
         
         for i, file in enumerate(uploaded_files):
             max_retries = 3
+            # Write the status cleanly, without exposing the retry loop to the user
+            status_text.write(f"Analyzing {i+1}/{total_files}: **{file.name}**")
+            
             for attempt in range(max_retries):
-                status_text.write(f"Analyzing {i+1}/{total_files}: **{file.name}**" + (f" *(Retry {attempt})*" if attempt > 0 else ""))
-                
                 try:
                     retailer, city = parse_filename(file.name)
                     image_bytes = prepare_image(file)
@@ -275,21 +277,43 @@ if uploaded_files and api_key:
                         
                         if response.text:
                             try:
-                                df_chunk = pd.read_json(io.StringIO(response.text))
+                                # 1. Strip out rogue Markdown formatting
+                                raw_text = response.text.strip()
+                                if raw_text.startswith("```json"):
+                                    raw_text = raw_text[7:]
+                                elif raw_text.startswith("```"):
+                                    raw_text = raw_text[3:]
+                                if raw_text.endswith("```"):
+                                    raw_text = raw_text[:-3]
+                                raw_text = raw_text.strip()
+                                
+                                # 2. Safely parse the cleaned string into Python
+                                parsed_json = json.loads(raw_text)
+                                
+                                # 3. Catch nested dictionaries
+                                if isinstance(parsed_json, dict):
+                                    for key, value in parsed_json.items():
+                                        if isinstance(value, list):
+                                            parsed_json = value
+                                            break
+                                
+                                # 4. Push to DataFrame
+                                df_chunk = pd.DataFrame(parsed_json)
                                 
                                 if not df_chunk.empty:
                                     df_chunk['Image_Name'] = file.name
                                     df_chunk['Retailer'] = retailer
                                     df_chunk['City'] = city
                                     
-                                    df_chunk['Pack_Size'] = df_chunk['Pack_Size'].apply(standardize_pack_size)
+                                    if 'Pack_Size' in df_chunk.columns:
+                                        df_chunk['Pack_Size'] = df_chunk['Pack_Size'].apply(standardize_pack_size)
                                     df_chunk = standardize_and_fix_prices(df_chunk)
                                     
                                     all_products.append(df_chunk)
                                 else:
                                     st.warning(f"⚠️ No products found in {file.name}.")
-                            except ValueError:
-                                st.warning(f"⚠️ AI returned invalid data structure for {file.name}.")
+                            except Exception as parse_error:
+                                st.warning(f"⚠️ AI returned invalid data structure for {file.name}. Error: {parse_error}")
                     
                     # Natural delay to respect Google's 15 Requests Per Minute speed limit
                     time.sleep(4) 
@@ -298,13 +322,13 @@ if uploaded_files and api_key:
                 except Exception as e:
                     if "429" in str(e) or "Quota" in str(e):
                         if attempt < max_retries - 1:
-                            status_text.write(f"⏳ **Speed limit reached.** Auto-pausing for 15 seconds before trying again...")
+                            # Silently pause and retry
                             time.sleep(15)
                         else:
-                            st.warning(f"⚠️ Skipped {file.name} after multiple retries (API Speed Limit). Moving to next image.")
+                            st.error(f"❌ Failed to process {file.name} after multiple API timeouts. It will be excluded from the final report.")
                             break # Move to the next file without crashing the app
                     else:
-                        st.error(f"❌ Skipped {file.name} due to error: {e}")
+                        st.error(f"❌ Skipped {file.name} due to an unexpected error. It will be excluded from the final report.")
                         break # Move to the next file without crashing the app
             
             progress_bar.progress((i + 1) / total_files)
