@@ -179,7 +179,6 @@ def standardize_and_fix_prices(df):
                 s = s.replace(',', '.')
             else:
                 s = s.replace(',', '')
-        # Catch obvious thousands separators that look like decimals (e.g. 8.500)
         elif '.' in s and re.search(r'\.\d{3}$', s) and not re.search(r'\.\d{3}\.', s):
             s = s.replace('.', '')
                 
@@ -196,7 +195,6 @@ def standardize_and_fix_prices(df):
         if median_price > 0:
             def fix_outlier(p):
                 if pd.isna(p) or p == 0: return p
-                # Widen the band to catch extreme decimal errors (e.g. 8.88 when median is 6500)
                 while p < 0.2 * median_price:
                     p *= 10
                 while p > 5 * median_price:
@@ -264,10 +262,12 @@ if uploaded_files and api_key:
                     image_bytes = prepare_image(file)
                     
                     if image_bytes:
+                        # NEW: ADDED EXPLICIT 120-SECOND TIMEOUT TO PREVENT DROPPED CONNECTIONS
                         response = model.generate_content(
                             [SYSTEM_PROMPT + f"\nContext: This store is in {city}, {retailer}.",
                              {"mime_type": "image/jpeg", "data": image_bytes}],
-                            generation_config={"response_mime_type": "application/json"}
+                            generation_config={"response_mime_type": "application/json"},
+                            request_options={"timeout": 120} 
                         )
                         
                         if response.text:
@@ -325,9 +325,14 @@ if uploaded_files and api_key:
                                     continue
                                     
                 except Exception as e:
+                    # NEW: SMART EXPONENTIAL BACKOFF FOR ALL TIMEOUTS AND ERRORS
                     if attempt < max_retries - 1:
-                        if "429" in str(e) or "Quota" in str(e):
+                        error_msg = str(e).lower()
+                        if "429" in error_msg or "quota" in error_msg:
                             time.sleep(15) 
+                        elif "timeout" in error_msg or "503" in error_msg or "504" in error_msg:
+                            # If Google's server is busy/timed out, wait 10s on first retry, 20s on second
+                            time.sleep(10 * (attempt + 1)) 
                         else:
                             time.sleep(5)  
                     else:
