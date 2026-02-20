@@ -53,7 +53,7 @@ with st.sidebar:
     st.divider()
     
     st.subheader("💰 Cost & Usage")
-    st.info("Approx. $0.35 per 1,000 image files processed.")
+    st.info("Approx. £0.30 per 1,000 image files processed.")
     
     st.divider()
     st.write("### 📝 Instructions")
@@ -142,13 +142,11 @@ def highlight_low_confidence(row):
     return [''] * len(row)
 
 def standardize_pack_size(val):
-    """Forces the pack size to be a pure number in ml or g, catching any AI formatting stray letters."""
     s = str(val).strip().lower()
     if s in ['n/a', 'nan', 'none', '', 'null']: 
         return 'N/A'
     
     multiplier = 1
-    # Check for unit types to standardize (e.g., converting Liters to ml, kg to g)
     if 'ml' in s:
         pass
     elif 'l' in s and 'ml' not in s:
@@ -158,7 +156,6 @@ def standardize_pack_size(val):
     elif 'g' in s and 'kg' not in s:
         pass
         
-    # Extract just the numeric part
     num_match = re.search(r'[\d\.]+', s.replace(',', '.'))
     if num_match:
         try:
@@ -169,7 +166,6 @@ def standardize_pack_size(val):
     return 'N/A'
 
 def standardize_and_fix_prices(df):
-    """Cleans currency formatting and auto-corrects decimal OCR errors based on local median."""
     if 'Price' not in df.columns:
         return df
         
@@ -177,12 +173,10 @@ def standardize_and_fix_prices(df):
         s = str(val).strip()
         if s.upper() in ['N/A', 'NAN', 'NONE', '']: 
             return None
-        # Remove anything that isn't a digit, comma, or decimal
         s = re.sub(r'[^\d.,]', '', s)
         if not s: 
             return None
         
-        # Handle European (1.200,50) vs US (1,200.50) formatting
         if ',' in s and '.' in s:
             if s.rfind(',') > s.rfind('.'):
                 s = s.replace('.', '').replace(',', '.')
@@ -264,46 +258,54 @@ if uploaded_files and api_key:
         total_files = len(uploaded_files)
         
         for i, file in enumerate(uploaded_files):
-            status_text.write(f"Analyzing {i+1}/{total_files}: **{file.name}**")
-            
-            try:
-                retailer, city = parse_filename(file.name)
-                image_bytes = prepare_image(file)
+            max_retries = 3
+            for attempt in range(max_retries):
+                status_text.write(f"Analyzing {i+1}/{total_files}: **{file.name}**" + (f" *(Retry {attempt})*" if attempt > 0 else ""))
                 
-                if image_bytes:
-                    response = model.generate_content(
-                        [SYSTEM_PROMPT + f"\nContext: This store is in {city}, {retailer}.",
-                         {"mime_type": "image/jpeg", "data": image_bytes}],
-                        generation_config={"response_mime_type": "application/json"}
-                    )
+                try:
+                    retailer, city = parse_filename(file.name)
+                    image_bytes = prepare_image(file)
                     
-                    if response.text:
-                        try:
-                            df_chunk = pd.read_json(io.StringIO(response.text))
-                            
-                            if not df_chunk.empty:
-                                df_chunk['Image_Name'] = file.name
-                                df_chunk['Retailer'] = retailer
-                                df_chunk['City'] = city
+                    if image_bytes:
+                        response = model.generate_content(
+                            [SYSTEM_PROMPT + f"\nContext: This store is in {city}, {retailer}.",
+                             {"mime_type": "image/jpeg", "data": image_bytes}],
+                            generation_config={"response_mime_type": "application/json"}
+                        )
+                        
+                        if response.text:
+                            try:
+                                df_chunk = pd.read_json(io.StringIO(response.text))
                                 
-                                # Clean data structures programmatically 
-                                df_chunk['Pack_Size'] = df_chunk['Pack_Size'].apply(standardize_pack_size)
-                                df_chunk = standardize_and_fix_prices(df_chunk)
-                                
-                                all_products.append(df_chunk)
-                            else:
-                                st.warning(f"⚠️ No products found in {file.name}.")
-                        except ValueError:
-                            st.warning(f"⚠️ AI returned invalid data structure for {file.name}.")
-                
-                time.sleep(1) 
-                
-            except Exception as e:
-                if "429" in str(e) or "Quota" in str(e):
-                    st.error("🛑 **API Limit Reached!** Your Google Cloud budget cap has been hit mid-batch.")
-                    st.stop()
-                else:
-                    st.error(f"❌ Skipped {file.name} due to error: {e}")
+                                if not df_chunk.empty:
+                                    df_chunk['Image_Name'] = file.name
+                                    df_chunk['Retailer'] = retailer
+                                    df_chunk['City'] = city
+                                    
+                                    df_chunk['Pack_Size'] = df_chunk['Pack_Size'].apply(standardize_pack_size)
+                                    df_chunk = standardize_and_fix_prices(df_chunk)
+                                    
+                                    all_products.append(df_chunk)
+                                else:
+                                    st.warning(f"⚠️ No products found in {file.name}.")
+                            except ValueError:
+                                st.warning(f"⚠️ AI returned invalid data structure for {file.name}.")
+                    
+                    # Natural delay to respect Google's 15 Requests Per Minute speed limit
+                    time.sleep(4) 
+                    break # Success! Break out of the retry loop.
+                    
+                except Exception as e:
+                    if "429" in str(e) or "Quota" in str(e):
+                        if attempt < max_retries - 1:
+                            status_text.write(f"⏳ **Speed limit reached.** Auto-pausing for 15 seconds before trying again...")
+                            time.sleep(15)
+                        else:
+                            st.warning(f"⚠️ Skipped {file.name} after multiple retries (API Speed Limit). Moving to next image.")
+                            break # Move to the next file without crashing the app
+                    else:
+                        st.error(f"❌ Skipped {file.name} due to error: {e}")
+                        break # Move to the next file without crashing the app
             
             progress_bar.progress((i + 1) / total_files)
             
@@ -311,7 +313,6 @@ if uploaded_files and api_key:
         if all_products:
             final_df = pd.concat(all_products, ignore_index=True)
             
-            # Rename columns to standard requirements
             final_df.rename(columns={
                 'Pack_Size': 'Pack_Size_(ml/g)', 
                 'Price': 'Price (local)'
@@ -342,7 +343,7 @@ if uploaded_files and api_key:
                 mime="text/csv"
             )
         else:
-            st.error("❌ No data generated.")
+            st.error("❌ No data generated from this batch.")
 
 elif uploaded_files and not api_key:
     st.warning("⚠️ Please enter your API Key in the sidebar or secrets to start.")
