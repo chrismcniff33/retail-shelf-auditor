@@ -8,6 +8,7 @@ import hmac
 import re
 import json
 import gc
+import zipfile
 
 # --- 1. PAGE CONFIGURATION ---
 st.set_page_config(page_title="AI Shelf Intelligence", page_icon="🔍", layout="wide")
@@ -61,7 +62,7 @@ with st.sidebar:
     st.write("### 📝 Instructions")
     st.markdown("""
     1. **Rename files** as: `Retailer-City-ShelfID.jpg`
-    2. Upload up to **100 images**.
+    2. Upload up to **100 images** (or a `.zip` folder).
     3. Click **Start Audit**.
     4. Download the Excel report.
     """)
@@ -215,7 +216,7 @@ def standardize_and_fix_prices(df):
     df = df.drop(columns=['Clean_Price'])
     return df
 
-# --- 6. HIGH-DEFINITION IMAGE PROCESSOR ---
+# --- 6. HIGH-DEFINITION IMAGE & ZIP PROCESSOR ---
 def prepare_image(uploaded_file):
     try:
         with Image.open(uploaded_file) as image:
@@ -229,157 +230,187 @@ def prepare_image(uploaded_file):
     except Exception as e:
         return None
 
+def extract_images_from_uploads(uploaded_files):
+    """Parses ZIP files, ignores hidden/system files, and extracts valid images."""
+    extracted_images = []
+    for file in uploaded_files:
+        if file.name.lower().endswith('.zip'):
+            with zipfile.ZipFile(file) as z:
+                for info in z.infolist():
+                    # Skip directories and hidden system files (like macOS __MACOSX or .DS_Store)
+                    if info.is_dir() or '__MACOSX' in info.filename or info.filename.split('/')[-1].startswith('.'):
+                        continue
+                    
+                    # Only grab actual image files
+                    if info.filename.lower().endswith(('.jpg', '.jpeg', '.png')):
+                        file_bytes = z.read(info.filename)
+                        pseudo_file = io.BytesIO(file_bytes)
+                        
+                        # Strip any folder paths so the file is just "Retailer-City-ShelfID.jpg"
+                        pseudo_file.name = info.filename.split('/')[-1]
+                        extracted_images.append(pseudo_file)
+        else:
+            # If it's just a normal image, append it directly
+            extracted_images.append(file)
+            
+    return extracted_images
+
 # --- 7. MAIN APP LOGIC ---
 st.title("🔍 AI Shelf Intelligence")
 
-uploaded_files = st.file_uploader("Upload Shelf Images (Max 100)", accept_multiple_files=True)
+# Updated uploader to explicitly accept ZIP files
+uploaded_files = st.file_uploader("Upload Shelf Images or a .zip file (Max 100 images total)", type=['jpg', 'jpeg', 'png', 'zip'], accept_multiple_files=True)
 
 if uploaded_files:
-    if len(uploaded_files) > 100:
-        st.error(f"🛑 **Upload Limit Exceeded!** You uploaded {len(uploaded_files)} images. Please upload a maximum of 100 images at a time.")
+    # Silently unpack the zip file and grab the images
+    image_files = extract_images_from_uploads(uploaded_files)
+    
+    if len(image_files) > 100:
+        st.error(f"🛑 **Upload Limit Exceeded!** Your upload contains {len(image_files)} images. Please upload a maximum of 100 images at a time.")
+        st.stop()
+    elif len(image_files) == 0:
+        st.warning("⚠️ No valid images (.jpg, .jpeg, .png) were found in the upload.")
         st.stop()
 
-if uploaded_files and api_key:
-    if st.button(f"Start Audit ({len(uploaded_files)} Images)"):
-        
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-2.0-flash')
-        
-        all_products = []
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        total_files = len(uploaded_files)
-        failed_files = []
-        
-        for i, file in enumerate(uploaded_files):
-            max_retries = 3
-            status_text.write(f"Analyzing {i+1}/{total_files}: **{file.name}**")
+    if api_key:
+        # Dynamically updates the button with the true number of extracted images
+        if st.button(f"Start Audit ({len(image_files)} Images)"):
             
-            for attempt in range(max_retries):
-                try:
-                    retailer, city = parse_filename(file.name)
-                    image_bytes = prepare_image(file)
-                    
-                    if image_bytes:
-                        # NEW: ADDED EXPLICIT 120-SECOND TIMEOUT TO PREVENT DROPPED CONNECTIONS
-                        response = model.generate_content(
-                            [SYSTEM_PROMPT + f"\nContext: This store is in {city}, {retailer}.",
-                             {"mime_type": "image/jpeg", "data": image_bytes}],
-                            generation_config={"response_mime_type": "application/json"},
-                            request_options={"timeout": 120} 
-                        )
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel('gemini-2.0-flash')
+            
+            all_products = []
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            total_files = len(image_files)
+            failed_files = []
+            
+            for i, file in enumerate(image_files):
+                max_retries = 3
+                status_text.write(f"Analyzing {i+1}/{total_files}: **{file.name}**")
+                
+                for attempt in range(max_retries):
+                    try:
+                        retailer, city = parse_filename(file.name)
+                        image_bytes = prepare_image(file)
                         
-                        if response.text:
-                            try:
-                                raw_text = response.text.strip()
-                                if raw_text.startswith("```json"):
-                                    raw_text = raw_text[7:]
-                                elif raw_text.startswith("```"):
-                                    raw_text = raw_text[3:]
-                                if raw_text.endswith("```"):
-                                    raw_text = raw_text[:-3]
-                                raw_text = raw_text.strip()
-                                
-                                parsed_json = json.loads(raw_text)
-                                
-                                if isinstance(parsed_json, dict):
-                                    for key, value in parsed_json.items():
-                                        if isinstance(value, list):
-                                            parsed_json = value
-                                            break
-                                
-                                df_chunk = pd.DataFrame(parsed_json)
-                                
-                                if not df_chunk.empty:
-                                    df_chunk['Image_Name'] = file.name
-                                    df_chunk['Retailer'] = retailer
-                                    df_chunk['City'] = city
+                        if image_bytes:
+                            response = model.generate_content(
+                                [SYSTEM_PROMPT + f"\nContext: This store is in {city}, {retailer}.",
+                                 {"mime_type": "image/jpeg", "data": image_bytes}],
+                                generation_config={"response_mime_type": "application/json"},
+                                request_options={"timeout": 120} 
+                            )
+                            
+                            if response.text:
+                                try:
+                                    raw_text = response.text.strip()
+                                    if raw_text.startswith("```json"):
+                                        raw_text = raw_text[7:]
+                                    elif raw_text.startswith("```"):
+                                        raw_text = raw_text[3:]
+                                    if raw_text.endswith("```"):
+                                        raw_text = raw_text[:-3]
+                                    raw_text = raw_text.strip()
                                     
-                                    if 'Pack_Size' in df_chunk.columns:
-                                        df_chunk['Pack_Size'] = df_chunk['Pack_Size'].apply(standardize_pack_size)
-                                    df_chunk = standardize_and_fix_prices(df_chunk)
+                                    parsed_json = json.loads(raw_text)
                                     
-                                    all_products.append(df_chunk)
+                                    if isinstance(parsed_json, dict):
+                                        for key, value in parsed_json.items():
+                                            if isinstance(value, list):
+                                                parsed_json = value
+                                                break
                                     
-                                    del image_bytes
-                                    del response
-                                    del parsed_json
-                                    gc.collect()
+                                    df_chunk = pd.DataFrame(parsed_json)
                                     
-                                    time.sleep(4)
-                                    break 
-                                    
-                                else:
+                                    if not df_chunk.empty:
+                                        df_chunk['Image_Name'] = file.name
+                                        df_chunk['Retailer'] = retailer
+                                        df_chunk['City'] = city
+                                        
+                                        if 'Pack_Size' in df_chunk.columns:
+                                            df_chunk['Pack_Size'] = df_chunk['Pack_Size'].apply(standardize_pack_size)
+                                        df_chunk = standardize_and_fix_prices(df_chunk)
+                                        
+                                        all_products.append(df_chunk)
+                                        
+                                        del image_bytes
+                                        del response
+                                        del parsed_json
+                                        gc.collect()
+                                        
+                                        time.sleep(4)
+                                        break 
+                                        
+                                    else:
+                                        if attempt == max_retries - 1:
+                                            failed_files.append(file.name)
+                                        else:
+                                            time.sleep(2)
+                                            continue
+                                            
+                                except Exception as parse_error:
                                     if attempt == max_retries - 1:
                                         failed_files.append(file.name)
                                     else:
                                         time.sleep(2)
                                         continue
                                         
-                            except Exception as parse_error:
-                                if attempt == max_retries - 1:
-                                    failed_files.append(file.name)
-                                else:
-                                    time.sleep(2)
-                                    continue
-                                    
-                except Exception as e:
-                    # NEW: SMART EXPONENTIAL BACKOFF FOR ALL TIMEOUTS AND ERRORS
-                    if attempt < max_retries - 1:
-                        error_msg = str(e).lower()
-                        if "429" in error_msg or "quota" in error_msg:
-                            time.sleep(15) 
-                        elif "timeout" in error_msg or "503" in error_msg or "504" in error_msg:
-                            # If Google's server is busy/timed out, wait 10s on first retry, 20s on second
-                            time.sleep(10 * (attempt + 1)) 
+                    except Exception as e:
+                        if attempt < max_retries - 1:
+                            error_msg = str(e).lower()
+                            if "429" in error_msg or "quota" in error_msg:
+                                time.sleep(15) 
+                            elif "timeout" in error_msg or "503" in error_msg or "504" in error_msg:
+                                time.sleep(10 * (attempt + 1)) 
+                            else:
+                                time.sleep(5)  
                         else:
-                            time.sleep(5)  
-                    else:
-                        failed_files.append(file.name)
-                        break 
-            
-            progress_bar.progress((i + 1) / total_files)
-            
-        # --- 8. FINAL TABLE ---
-        if all_products:
-            final_df = pd.concat(all_products, ignore_index=True)
-            
-            final_df.rename(columns={
-                'Pack_Size': 'Pack_Size_(ml/g)', 
-                'Price': 'Price (local)'
-            }, inplace=True)
-            
-            desired_order = [
-                "Image_Name", "Country", "City", "Retailer", "Category", 
-                "Product_Name", "Brand", "Manufacturer", 
-                "Pack_Size_(ml/g)", "Quantity", "Price (local)", "Promo", 
-                "Position", "Facings", "Confidence"
-            ]
-            
-            for col in desired_order:
-                if col not in final_df.columns:
-                    final_df[col] = ""
-            
-            final_df = final_df[desired_order]
-            
-            st.success("✅ Audit Complete!")
-            
-            if failed_files:
-                st.warning(f"⚠️ The following images were excluded due to API timeouts or unreadable data: {', '.join(failed_files)}")
+                            failed_files.append(file.name)
+                            break 
                 
-            st.write("### 📊 Audit Data Preview")
-            st.dataframe(final_df.style.apply(highlight_low_confidence, axis=1))
-            
-            csv = final_df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="📥 Download Excel/CSV Report",
-                data=csv,
-                file_name="ai_shelf_intelligence_data.csv",
-                mime="text/csv"
-            )
-        else:
-            st.error("❌ No data generated from this batch.")
+                progress_bar.progress((i + 1) / total_files)
+                
+            # --- 8. FINAL TABLE ---
+            if all_products:
+                final_df = pd.concat(all_products, ignore_index=True)
+                
+                final_df.rename(columns={
+                    'Pack_Size': 'Pack_Size_(ml/g)', 
+                    'Price': 'Price (local)'
+                }, inplace=True)
+                
+                desired_order = [
+                    "Image_Name", "Country", "City", "Retailer", "Category", 
+                    "Product_Name", "Brand", "Manufacturer", 
+                    "Pack_Size_(ml/g)", "Quantity", "Price (local)", "Promo", 
+                    "Position", "Facings", "Confidence"
+                ]
+                
+                for col in desired_order:
+                    if col not in final_df.columns:
+                        final_df[col] = ""
+                
+                final_df = final_df[desired_order]
+                
+                st.success("✅ Audit Complete!")
+                
+                if failed_files:
+                    st.warning(f"⚠️ The following images were excluded due to API timeouts or unreadable data: {', '.join(failed_files)}")
+                    
+                st.write("### 📊 Audit Data Preview")
+                st.dataframe(final_df.style.apply(highlight_low_confidence, axis=1))
+                
+                csv = final_df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="📥 Download Excel/CSV Report",
+                    data=csv,
+                    file_name="ai_shelf_intelligence_data.csv",
+                    mime="text/csv"
+                )
+            else:
+                st.error("❌ No data generated from this batch.")
 
-elif uploaded_files and not api_key:
+elif not api_key:
     st.warning("⚠️ Please enter your API Key in the sidebar or secrets to start.")
