@@ -55,7 +55,7 @@ with st.sidebar:
     st.divider()
     
     st.subheader("💰 Cost & Usage")
-    st.info("Approx. £0.30 per 1,000 image files processed.")
+    st.info("Approx. $0.50 per 1,000 image files processed.")
     
     st.divider()
     st.write("### 📝 Instructions")
@@ -391,3 +391,4 @@ if uploaded_files and api_key:
 
 elif uploaded_files and not api_key:
     st.warning("⚠️ Please enter your API Key in the sidebar or secrets to start.")
+
