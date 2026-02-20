@@ -72,6 +72,11 @@ Context: The image filename suggests the retailer and city.
 
 CRITICAL INSTRUCTION: This is a highly dense display. Scan the image systematically (top-to-bottom, left-to-right) to ensure absolutely ZERO products are missed. Look carefully in the back rows and on the bottom shelves.
 
+CRITICAL JSON INSTRUCTIONS:
+- You MUST output a strictly valid JSON array of objects.
+- Do NOT use unescaped double quotes inside your string values (e.g., use 'Buy 1 Get 1' instead of "Buy 1 Get 1"). 
+- Do NOT wrap the response in markdown blocks (like ```json). Just return the raw array.
+
 --- MANUFACTURER DICTIONARY (Colombia & Nigeria Focus) ---
 Use this mapping to assign "Manufacturer". If a brand is not listed, use your internal knowledge.
 Postobón S.A.: Postobón, Hit, Cristal, Bretaña, Colombiana, Popular, Freskola, Hipinto, Speed Max, Peak, Sr. Toronjo, Agua Oasis.
@@ -257,6 +262,7 @@ if uploaded_files and api_key:
         status_text = st.empty()
         
         total_files = len(uploaded_files)
+        failed_files = []
         
         for i, file in enumerate(uploaded_files):
             max_retries = 3
@@ -310,26 +316,35 @@ if uploaded_files and api_key:
                                     df_chunk = standardize_and_fix_prices(df_chunk)
                                     
                                     all_products.append(df_chunk)
+                                    
+                                    # Natural delay for successful generation before moving to the next file
+                                    time.sleep(4)
+                                    break # Success! Break out of the retry loop.
+                                    
                                 else:
-                                    st.warning(f"⚠️ No products found in {file.name}.")
+                                    if attempt == max_retries - 1:
+                                        failed_files.append(file.name)
+                                    else:
+                                        time.sleep(2)
+                                        continue # Empty dataframe returned, try again silently
+                                        
                             except Exception as parse_error:
-                                st.warning(f"⚠️ AI returned invalid data structure for {file.name}. Error: {parse_error}")
-                    
-                    # Natural delay to respect Google's 15 Requests Per Minute speed limit
-                    time.sleep(4) 
-                    break # Success! Break out of the retry loop.
-                    
+                                if attempt == max_retries - 1:
+                                    failed_files.append(file.name)
+                                else:
+                                    time.sleep(2)
+                                    continue # JSON crashed, try again silently
+                                    
                 except Exception as e:
-                    if "429" in str(e) or "Quota" in str(e):
-                        if attempt < max_retries - 1:
-                            # Silently pause and retry
-                            time.sleep(15)
+                    if attempt < max_retries - 1:
+                        # Silently pause and retry for network/API errors
+                        if "429" in str(e) or "Quota" in str(e):
+                            time.sleep(15) # Longer cooldown for speed limits
                         else:
-                            st.error(f"❌ Failed to process {file.name} after multiple API timeouts. It will be excluded from the final report.")
-                            break # Move to the next file without crashing the app
+                            time.sleep(5)  # Standard cooldown for 500 errors
                     else:
-                        st.error(f"❌ Skipped {file.name} due to an unexpected error. It will be excluded from the final report.")
-                        break # Move to the next file without crashing the app
+                        failed_files.append(file.name)
+                        break # Max retries hit, skip this file entirely
             
             progress_bar.progress((i + 1) / total_files)
             
@@ -356,6 +371,11 @@ if uploaded_files and api_key:
             final_df = final_df[desired_order]
             
             st.success("✅ Audit Complete!")
+            
+            # Show the final failure report if any images didn't make it
+            if failed_files:
+                st.warning(f"⚠️ The following images were excluded due to API timeouts or unreadable data: {', '.join(failed_files)}")
+                
             st.write("### 📊 Audit Data Preview")
             st.dataframe(final_df.style.apply(highlight_low_confidence, axis=1))
             
