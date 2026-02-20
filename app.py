@@ -7,6 +7,7 @@ import io
 import hmac
 import re
 import json
+import gc  # NEW: Imports Python's Garbage Collector
 
 # --- 1. PAGE CONFIGURATION ---
 st.set_page_config(page_title="AI Shelf Intelligence", page_icon="🔍", layout="wide")
@@ -54,7 +55,7 @@ with st.sidebar:
     st.divider()
     
     st.subheader("💰 Cost & Usage")
-    st.info("Approx. $0.35 per 1,000 image files processed.")
+    st.info("Approx. £0.30 per 1,000 image files processed.")
     
     st.divider()
     st.write("### 📝 Instructions")
@@ -229,15 +230,16 @@ def standardize_and_fix_prices(df):
 
 # --- 6. HIGH-DEFINITION IMAGE PROCESSOR ---
 def prepare_image(uploaded_file):
+    # NEW: Using the 'with' context manager to force PIL to close the image from memory immediately
     try:
-        image = Image.open(uploaded_file)
-        if image.mode != 'RGB':
-            image = image.convert('RGB')
-        
-        image.thumbnail((2500, 2500))
-        img_byte_arr = io.BytesIO()
-        image.save(img_byte_arr, format='JPEG', quality=95)
-        return img_byte_arr.getvalue()
+        with Image.open(uploaded_file) as image:
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+            
+            image.thumbnail((2500, 2500))
+            img_byte_arr = io.BytesIO()
+            image.save(img_byte_arr, format='JPEG', quality=95)
+            return img_byte_arr.getvalue()
     except Exception as e:
         return None
 
@@ -266,7 +268,6 @@ if uploaded_files and api_key:
         
         for i, file in enumerate(uploaded_files):
             max_retries = 3
-            # Write the status cleanly, without exposing the retry loop to the user
             status_text.write(f"Analyzing {i+1}/{total_files}: **{file.name}**")
             
             for attempt in range(max_retries):
@@ -283,7 +284,6 @@ if uploaded_files and api_key:
                         
                         if response.text:
                             try:
-                                # 1. Strip out rogue Markdown formatting
                                 raw_text = response.text.strip()
                                 if raw_text.startswith("```json"):
                                     raw_text = raw_text[7:]
@@ -293,17 +293,14 @@ if uploaded_files and api_key:
                                     raw_text = raw_text[:-3]
                                 raw_text = raw_text.strip()
                                 
-                                # 2. Safely parse the cleaned string into Python
                                 parsed_json = json.loads(raw_text)
                                 
-                                # 3. Catch nested dictionaries
                                 if isinstance(parsed_json, dict):
                                     for key, value in parsed_json.items():
                                         if isinstance(value, list):
                                             parsed_json = value
                                             break
                                 
-                                # 4. Push to DataFrame
                                 df_chunk = pd.DataFrame(parsed_json)
                                 
                                 if not df_chunk.empty:
@@ -317,34 +314,38 @@ if uploaded_files and api_key:
                                     
                                     all_products.append(df_chunk)
                                     
-                                    # Natural delay for successful generation before moving to the next file
+                                    # NEW: Aggressive Garbage Collection to prevent RAM crashes mid-batch
+                                    del image_bytes
+                                    del response
+                                    del parsed_json
+                                    gc.collect()
+                                    
                                     time.sleep(4)
-                                    break # Success! Break out of the retry loop.
+                                    break # Success
                                     
                                 else:
                                     if attempt == max_retries - 1:
                                         failed_files.append(file.name)
                                     else:
                                         time.sleep(2)
-                                        continue # Empty dataframe returned, try again silently
+                                        continue
                                         
                             except Exception as parse_error:
                                 if attempt == max_retries - 1:
                                     failed_files.append(file.name)
                                 else:
                                     time.sleep(2)
-                                    continue # JSON crashed, try again silently
+                                    continue
                                     
                 except Exception as e:
                     if attempt < max_retries - 1:
-                        # Silently pause and retry for network/API errors
                         if "429" in str(e) or "Quota" in str(e):
-                            time.sleep(15) # Longer cooldown for speed limits
+                            time.sleep(15) 
                         else:
-                            time.sleep(5)  # Standard cooldown for 500 errors
+                            time.sleep(5)  
                     else:
                         failed_files.append(file.name)
-                        break # Max retries hit, skip this file entirely
+                        break 
             
             progress_bar.progress((i + 1) / total_files)
             
@@ -372,7 +373,6 @@ if uploaded_files and api_key:
             
             st.success("✅ Audit Complete!")
             
-            # Show the final failure report if any images didn't make it
             if failed_files:
                 st.warning(f"⚠️ The following images were excluded due to API timeouts or unreadable data: {', '.join(failed_files)}")
                 
