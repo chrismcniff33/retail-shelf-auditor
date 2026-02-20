@@ -216,14 +216,16 @@ def standardize_and_fix_prices(df):
     df = df.drop(columns=['Clean_Price'])
     return df
 
-# --- 6. HIGH-DEFINITION IMAGE & ZIP PROCESSOR ---
+# --- 6. OPTIMIZED HIGH-DEFINITION IMAGE & ZIP PROCESSOR ---
 def prepare_image(uploaded_file):
     try:
         with Image.open(uploaded_file) as image:
             if image.mode != 'RGB':
                 image = image.convert('RGB')
             
-            image.thumbnail((2500, 2500))
+            # OPTIMIZATION: Reduced from 2500px to 2048px. 
+            # This is the 2K sweet spot for AI Vision models, drastically reducing timeouts while preserving OCR text quality.
+            image.thumbnail((2048, 2048))
             img_byte_arr = io.BytesIO()
             image.save(img_byte_arr, format='JPEG', quality=95)
             return img_byte_arr.getvalue()
@@ -231,7 +233,6 @@ def prepare_image(uploaded_file):
         return None
 
 def extract_images_from_uploads(uploaded_files):
-    """Parses ZIP files, ignores hidden/system files, and extracts valid images."""
     extracted_images = []
     for file in uploaded_files:
         if file.name.lower().endswith('.zip'):
@@ -288,16 +289,18 @@ if uploaded_files:
                         image_bytes = prepare_image(file)
                         
                         if image_bytes:
-                            # NEW: Explicitly forcing Temperature to 0.0 for 100% deterministic rigor
+                            # OPTIMIZATION: 
+                            # 1. Temperature changed to 0.1 to prevent "cognitive looping" on ambiguous pixels.
+                            # 2. Timeout massively increased to 600s (10 minutes) so the client never hangs up early.
                             response = model.generate_content(
                                 [SYSTEM_PROMPT + f"\nContext: This store is in {city}, {retailer}.",
                                  {"mime_type": "image/jpeg", "data": image_bytes}],
                                 generation_config={
                                     "response_mime_type": "application/json",
-                                    "temperature": 0.0,
+                                    "temperature": 0.1,
                                     "max_output_tokens": 8192
                                 },
-                                request_options={"timeout": 120} 
+                                request_options={"timeout": 600} 
                             )
                             
                             if response.text:
