@@ -237,20 +237,15 @@ def extract_images_from_uploads(uploaded_files):
         if file.name.lower().endswith('.zip'):
             with zipfile.ZipFile(file) as z:
                 for info in z.infolist():
-                    # Skip directories and hidden system files (like macOS __MACOSX or .DS_Store)
                     if info.is_dir() or '__MACOSX' in info.filename or info.filename.split('/')[-1].startswith('.'):
                         continue
                     
-                    # Only grab actual image files
                     if info.filename.lower().endswith(('.jpg', '.jpeg', '.png')):
                         file_bytes = z.read(info.filename)
                         pseudo_file = io.BytesIO(file_bytes)
-                        
-                        # Strip any folder paths so the file is just "Retailer-City-ShelfID.jpg"
                         pseudo_file.name = info.filename.split('/')[-1]
                         extracted_images.append(pseudo_file)
         else:
-            # If it's just a normal image, append it directly
             extracted_images.append(file)
             
     return extracted_images
@@ -258,11 +253,9 @@ def extract_images_from_uploads(uploaded_files):
 # --- 7. MAIN APP LOGIC ---
 st.title("🔍 AI Shelf Intelligence")
 
-# Updated uploader to explicitly accept ZIP files
 uploaded_files = st.file_uploader("Upload Shelf Images or a .zip file (Max 100 images total)", type=['jpg', 'jpeg', 'png', 'zip'], accept_multiple_files=True)
 
 if uploaded_files:
-    # Silently unpack the zip file and grab the images
     image_files = extract_images_from_uploads(uploaded_files)
     
     if len(image_files) > 100:
@@ -273,7 +266,6 @@ if uploaded_files:
         st.stop()
 
     if api_key:
-        # Dynamically updates the button with the true number of extracted images
         if st.button(f"Start Audit ({len(image_files)} Images)"):
             
             genai.configure(api_key=api_key)
@@ -296,10 +288,15 @@ if uploaded_files:
                         image_bytes = prepare_image(file)
                         
                         if image_bytes:
+                            # NEW: Explicitly forcing Temperature to 0.0 for 100% deterministic rigor
                             response = model.generate_content(
                                 [SYSTEM_PROMPT + f"\nContext: This store is in {city}, {retailer}.",
                                  {"mime_type": "image/jpeg", "data": image_bytes}],
-                                generation_config={"response_mime_type": "application/json"},
+                                generation_config={
+                                    "response_mime_type": "application/json",
+                                    "temperature": 0.0,
+                                    "max_output_tokens": 8192
+                                },
                                 request_options={"timeout": 120} 
                             )
                             
