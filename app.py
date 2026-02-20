@@ -7,7 +7,7 @@ import io
 import hmac
 import re
 import json
-import gc  # NEW: Imports Python's Garbage Collector
+import gc
 
 # --- 1. PAGE CONFIGURATION ---
 st.set_page_config(page_title="AI Shelf Intelligence", page_icon="🔍", layout="wide")
@@ -55,7 +55,7 @@ with st.sidebar:
     st.divider()
     
     st.subheader("💰 Cost & Usage")
-    st.info("Approx. $0.50 per 1,000 image files processed.")
+    st.info("Approx. $0.35 per 1,000 image files processed.")
     
     st.divider()
     st.write("### 📝 Instructions")
@@ -71,31 +71,28 @@ SYSTEM_PROMPT = """
 You are a global retail data expert strictly adhering to Euromonitor category definitions. Analyze this shelf image. 
 Context: The image filename suggests the retailer and city.
 
-CRITICAL INSTRUCTION: This is a highly dense display. Scan the image systematically (top-to-bottom, left-to-right) to ensure absolutely ZERO products are missed. Look carefully in the back rows and on the bottom shelves.
+CRITICAL INSTRUCTION: This is a highly dense display. Scan the image systematically (top-to-bottom, left-to-right) to ensure absolutely ZERO products are missed. 
 
 CRITICAL JSON INSTRUCTIONS:
 - You MUST output a strictly valid JSON array of objects.
-- Do NOT use unescaped double quotes inside your string values (e.g., use 'Buy 1 Get 1' instead of "Buy 1 Get 1"). 
+- Do NOT use unescaped double quotes inside your string values. 
 - Do NOT wrap the response in markdown blocks (like ```json). Just return the raw array.
 
---- MANUFACTURER DICTIONARY (Colombia & Nigeria Focus) ---
+--- MANUFACTURER DICTIONARY ---
 Use this mapping to assign "Manufacturer". If a brand is not listed, use your internal knowledge.
 Postobón S.A.: Postobón, Hit, Cristal, Bretaña, Colombiana, Popular, Freskola, Hipinto, Speed Max, Peak, Sr. Toronjo, Agua Oasis.
-PepsiCo: Pepsi, 7Up, Mirinda, Mountain Dew, H2Oh!, Gatorade, Aquafina, Teem, Lipton Ice Tea (JV).
-The Coca-Cola Company: Coca-Cola, Sprite, Fanta, Quatro, Brisa, Manantial, Valle, Del Valle, Powerade, Fuze Tea, Eva, Five Alive, Limca, Gold Spot, Schweppes, Minute Maid, SmartWater.
+PepsiCo: Pepsi, 7Up, Mirinda, Mountain Dew, H2Oh!, Gatorade, Aquafina, Teem, Lipton Ice Tea (JV), Lay's, Doritos.
+The Coca-Cola Company: Coca-Cola, Sprite, Fanta, Quatro, Brisa, Manantial, Valle, Del Valle, Powerade, Fuze Tea, Eva, Five Alive.
 Quala: Vive100%, Suntea, Saviloe, Ego, Light, Bonyurt (Alpina JV).
-Bavaria (AB InBev): Pony Malta, Malta Leona.
-Nestlé: Milo, Nescafé, Pure Life, Nestea (JV), Bikkle.
+Bavaria (AB InBev): Pony Malta, Malta Leona, Aguila, Poker, Club Colombia, Costeña, Corona, Stella Artois, Budweiser.
+Heineken N.V.: Heineken, Amstel, Sol, Desperados.
+Diageo: Smirnoff, Johnnie Walker, Baileys, Guinness, Malta Guinness, Orijin.
+Nestlé: Milo, Nescafé, Pure Life, Nestea, Bikkle.
 Suntory / Asahi / GSK: Ribena, Lucozade, Aquarius, Calpis.
 La Casera Company: La Casera, Bold, Nirvana.
 Rite Foods: Bigi, Fearless, Rite.
 TGI Group: Chivita, Hollandia.
 Aje Group: Big Cola, Cifrut, Sporade, Cielo, Pulp.
-Monster Beverage Corp: Monster, Predator.
-Red Bull GmbH: Red Bull.
-Danone: Bonafont, Evian, Volvic.
-Dr Pepper Snapple Group: Dr Pepper, Shasta.
-Other Nigeria/LatAm Brands: Viju (Viju Ind.), Cway (Cway Group), Capri-Sun (Wild/NBC), Smoov (Lacasera), Sosa (Rite Foods), Malta Guinness (Diageo), Amstel Malta (Heineken), Fayrouz (Heineken), Orijin Zero (Diageo), Zobo (Various), Alpina (Alpina).
 --- END DICTIONARY ---
 
 Task: Extract all visible products and return a JSON list of objects with these exact keys:
@@ -104,27 +101,15 @@ Task: Extract all visible products and return a JSON list of objects with these 
 2. "Brand": Brand name.
 3. "Manufacturer": Refer to the DICTIONARY above. If missing, use internal knowledge.
 4. "Category": 
-   - FOR SOFT DRINKS: You MUST use one of these EXACT strings:
-     'Still Natural Mineral Bottled Water', 'Still Spring Bottled Water', 'Still Purified Bottled Water',
-     'Carbonated Natural Mineral Bottled Water', 'Carbonated Spring Bottled Water', 'Carbonated Purified Bottled Water',
-     'Still Flavoured Bottled Water', 'Sparkling Flavoured Bottled Water', 'Functional Bottled Water',
-     'Regular Cola Carbonates', 'Reduced Sugar Cola Carbonates',
-     'Regular Lemonade/Lime', 'Reduced Sugar Lemonade/Lime',
-     'Regular Orange Carbonates', 'Reduced Sugar Orange Carbonates',
-     'Regular Tonic Water/Mixers/Other Bitters', 'Reduced Sugar Tonic Water/Mixers/Other Bitters',
-     'Regular Other Non-Cola Carbonates', 'Reduced Sugar Other Non-Cola Carbonates',
-     'Liquid Concentrates', 'Powder Concentrates',
-     '100% Juice', 'Nectars', 'Juice Drinks (up to 24% Juice)', 'Coconut and Other Plant Waters',
-     'Regular Still RTD Tea', 'Reduced Sugar Still RTD Tea', 'Carbonated RTD Tea and Kombucha',
-     'RTD Coffee',
-     'Regular Energy Drinks', 'Reduced Sugar Energy Drinks',
-     'Regular Sports Drinks', 'Reduced Sugar Sports Drinks',
-     'Asian Speciality Drinks'.
+   - FOR SOFT DRINKS: 'Still Natural Mineral Bottled Water', 'Carbonated Purified Bottled Water', 'Still Flavoured Bottled Water', 'Sparkling Flavoured Bottled Water', 'Functional Bottled Water', 'Regular Cola Carbonates', 'Reduced Sugar Cola Carbonates', 'Regular Lemonade/Lime', 'Regular Orange Carbonates', 'Regular Tonic Water/Mixers/Other Bitters', 'Regular Other Non-Cola Carbonates', 'Liquid Concentrates', '100% Juice', 'Nectars', 'Juice Drinks (up to 24% Juice)', 'Coconut and Other Plant Waters', 'Regular Still RTD Tea', 'Carbonated RTD Tea and Kombucha', 'RTD Coffee', 'Regular Energy Drinks', 'Regular Sports Drinks', 'Asian Speciality Drinks'.
+   - FOR ALCOHOLIC DRINKS: 'Lager', 'Dark Beer', 'Stout', 'Non/Low Alcohol Beer', 'Cider/Perry', 'Malt-based RTDs', 'Spirit-based RTDs', 'Wine-based RTDs', 'Blended Scotch Whisky', 'Single Malt Scotch Whisky', 'Bourbon/Other US Whiskey', 'Cognac', 'Brandy', 'Gin', 'Vodka', 'Dark Rum', 'White Rum', 'Tequila', 'Liqueurs', 'Still Red Wine', 'Still White Wine', 'Still Rosé Wine', 'Champagne', 'Other Sparkling Wine', 'Fortified Wine and Vermouth'.
+   - FOR SNACKS: 'Tablets', 'Countlines', 'Chocolate Pouches and Bags', 'Boxed Assortments', 'Boiled Sweets', 'Chewy Candies', 'Gummies and Jellies', 'Mints', 'Toffees, Caramels and Nougat', 'Chewing Gum', 'Potato Chips', 'Tortilla Chips', 'Puffed Snacks', 'Nuts, Seeds and Trail Mixes', 'Popcorn', 'Pretzels', 'Cereal Bars', 'Protein/Energy Bars', 'Cookies', 'Chocolate Coated Biscuits', 'Filled Biscuits', 'Plain Biscuits', 'Wafers'.
+   - FOR DAIRY: 'Butter', 'Margarine and Spreads', 'Spreadable Cheese', 'Processed Cheese', 'Hard Cheese', 'Soft Cheese', 'Flavoured Milk Drinks', 'Fresh Milk', 'Shelf Stable Milk', 'Powder Milk', 'Drinking Yoghurt', 'Flavoured Yoghurt', 'Plain Yoghurt', 'Soy Drinks', 'Other Plant-based Milk'.
    - FOR OTHER FMCG: Map to the most GRANULAR Euromonitor category possible.
 5. "Country": Identify the Country based on the City/Retailer provided.
-6. "Pack_Size": Return strictly as a NUMBER. Convert all soft drinks to milliliters (ml) (e.g., if it's 1.5L, output 1500. If 330ml, output 330). Convert all solid foods to grams (g) (e.g., if 1kg, output 1000). If OCR is unreadable, ESTIMATE the volume in ml/g using visual spatial reasoning. Do not write 'ml' or 'g', just the number.
+6. "Pack_Size": Return strictly as a NUMBER. Convert all soft drinks to milliliters (ml) (e.g., 1.5L = 1500, 330ml = 330). Convert all solid foods to grams (g). ESTIMATE volume in ml/g using visual spatial reasoning if unreadable. Do not write 'ml' or 'g'.
 7. "Quantity": Unit count if visible. Else '1'.
-8. "Price": Price on tag. Write numbers only if possible. If missing, write 'N/A'.
+8. "Price": Price on tag. Write numbers only. If missing, write 'N/A'.
 9. "Promo": Description of any promo tag. If none, write ''.
 10. "Position": Shelf level (Top/Middle/Bottom).
 11. "Facings": Integer count of identical items side-by-side.
@@ -194,6 +179,9 @@ def standardize_and_fix_prices(df):
                 s = s.replace(',', '.')
             else:
                 s = s.replace(',', '')
+        # Catch obvious thousands separators that look like decimals (e.g. 8.500)
+        elif '.' in s and re.search(r'\.\d{3}$', s) and not re.search(r'\.\d{3}\.', s):
+            s = s.replace('.', '')
                 
         try:
             return float(s)
@@ -207,12 +195,13 @@ def standardize_and_fix_prices(df):
         median_price = valid_prices.median()
         if median_price > 0:
             def fix_outlier(p):
-                if pd.isna(p): return p
-                while p > 10 * median_price:
-                    p /= 10
-                while p < 0.1 * median_price and p > 0:
+                if pd.isna(p) or p == 0: return p
+                # Widen the band to catch extreme decimal errors (e.g. 8.88 when median is 6500)
+                while p < 0.2 * median_price:
                     p *= 10
-                return p
+                while p > 5 * median_price:
+                    p /= 10
+                return round(p, 2)
             
             df['Clean_Price'] = df['Clean_Price'].apply(fix_outlier)
     
@@ -230,7 +219,6 @@ def standardize_and_fix_prices(df):
 
 # --- 6. HIGH-DEFINITION IMAGE PROCESSOR ---
 def prepare_image(uploaded_file):
-    # NEW: Using the 'with' context manager to force PIL to close the image from memory immediately
     try:
         with Image.open(uploaded_file) as image:
             if image.mode != 'RGB':
@@ -314,14 +302,13 @@ if uploaded_files and api_key:
                                     
                                     all_products.append(df_chunk)
                                     
-                                    # NEW: Aggressive Garbage Collection to prevent RAM crashes mid-batch
                                     del image_bytes
                                     del response
                                     del parsed_json
                                     gc.collect()
                                     
                                     time.sleep(4)
-                                    break # Success
+                                    break 
                                     
                                 else:
                                     if attempt == max_retries - 1:
@@ -391,4 +378,3 @@ if uploaded_files and api_key:
 
 elif uploaded_files and not api_key:
     st.warning("⚠️ Please enter your API Key in the sidebar or secrets to start.")
-
