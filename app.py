@@ -49,6 +49,9 @@ if 'audit_results' not in st.session_state:
     st.session_state['audit_results'] = None
 if 'failed_files' not in st.session_state:
     st.session_state['failed_files'] = []
+# NEW: Persistent list to hold data continuously during the loop
+if 'live_data_chunks' not in st.session_state:
+    st.session_state['live_data_chunks'] = []
 
 # --- 4. SIDEBAR & API SETUP ---
 with st.sidebar:
@@ -72,7 +75,8 @@ with st.sidebar:
     1. **Rename files** as: `Retailer-City-ShelfID.jpg`
     2. Upload up to **250 images** (or a `.zip` folder).
     3. Click **Start Audit**.
-    4. Download the Excel report.
+    4. Watch the live progress.
+    5. Download the final Excel report.
     """)
 
 # --- 5. SYSTEM PROMPT ---
@@ -225,7 +229,6 @@ def standardize_and_fix_prices(df):
     return df
 
 # --- 7. DISK-SPOOLING IMAGE PROCESSOR ---
-# NEW: Changed to accept a file path from the hard drive instead of raw memory bytes
 def prepare_image(image_path):
     try:
         with Image.open(image_path) as image:
@@ -239,7 +242,6 @@ def prepare_image(image_path):
     except Exception as e:
         return None
 
-# NEW: Extracts ZIP files to a hidden temporary folder on the server's hard drive
 def extract_to_disk(uploaded_files, temp_dir):
     extracted_files = []
     for file in uploaded_files:
@@ -268,12 +270,11 @@ st.title("🔍 AI Shelf Intelligence")
 uploaded_files = st.file_uploader("Upload Shelf Images or a .zip file (Max 250 images total)", type=['jpg', 'jpeg', 'png', 'zip'], accept_multiple_files=True)
 
 if uploaded_files:
-    # NEW: Create a temporary directory on the hard drive that automatically deletes itself when done
     with tempfile.TemporaryDirectory() as temp_dir:
         image_files = extract_to_disk(uploaded_files, temp_dir)
         
         if len(image_files) > 250:
-            st.error(f"🛑 **Upload Limit Exceeded!** Your upload contains {len(image_files)} images. Please upload a maximum of 250 images at a time.")
+            st.error(f"🛑 **Upload Limit Exceeded!** Your upload contains {len(image_files)} images.")
             st.stop()
         elif len(image_files) == 0:
             st.warning("⚠️ No valid images (.jpg, .jpeg, .png) were found in the upload.")
@@ -282,15 +283,19 @@ if uploaded_files:
         if api_key:
             if st.button(f"Start Audit ({len(image_files)} Images)"):
                 
+                # Reset Session States
                 st.session_state['audit_results'] = None
                 st.session_state['failed_files'] = []
+                st.session_state['live_data_chunks'] = []
                 
                 genai.configure(api_key=api_key)
                 model = genai.GenerativeModel('gemini-2.0-flash')
                 
-                all_products = []
+                # --- NEW: UI PLACEHOLDERS FOR LIVE UPDATING ---
+                st.write("### ⏱️ Live Processing Progress")
                 progress_bar = st.progress(0)
                 status_text = st.empty()
+                live_table_placeholder = st.empty()
                 
                 total_files = len(image_files)
                 failed_files = []
@@ -305,7 +310,6 @@ if uploaded_files:
                     for attempt in range(max_retries):
                         try:
                             retailer, city = parse_filename(file_name)
-                            # Loads exactly one image from disk into memory
                             image_bytes = prepare_image(file_path)
                             
                             if image_bytes:
@@ -350,9 +354,25 @@ if uploaded_files:
                                                 df_chunk['Pack_Size'] = df_chunk['Pack_Size'].apply(standardize_pack_size)
                                             df_chunk = standardize_and_fix_prices(df_chunk)
                                             
-                                            all_products.append(df_chunk)
+                                            # --- NEW: APPEND DIRECTLY TO SESSION STATE ---
+                                            st.session_state['live_data_chunks'].append(df_chunk)
                                             
-                                            # Wipes the memory clean before the next loop
+                                            # Build & display the interim table so far
+                                            interim_df = pd.concat(st.session_state['live_data_chunks'], ignore_index=True)
+                                            
+                                            # Ensure formatting is clean for the live display
+                                            desired_order = [
+                                                "Image_Name", "Country", "City", "Retailer", "Category", 
+                                                "Product_Name", "Brand", "Manufacturer", 
+                                                "Pack_Size", "Quantity", "Price", "Promo", 
+                                                "Position", "Facings", "Confidence"
+                                            ]
+                                            for col in desired_order:
+                                                if col not in interim_df.columns:
+                                                    interim_df[col] = ""
+                                            
+                                            live_table_placeholder.dataframe(interim_df[desired_order].style.apply(highlight_low_confidence, axis=1))
+                                            
                                             del image_bytes
                                             del response
                                             del parsed_json
@@ -390,12 +410,13 @@ if uploaded_files:
                     
                     progress_bar.progress((i + 1) / total_files)
                     
-                # --- 9. SAVE RESULTS TO MEMORY ---
+                # --- 9. BATCH FINISHED: FORMAT FINAL MEMORY STATE ---
                 status_text.empty() 
                 progress_bar.empty() 
+                live_table_placeholder.empty() # Clear the temporary live table
                 
-                if all_products:
-                    final_df = pd.concat(all_products, ignore_index=True)
+                if st.session_state['live_data_chunks']:
+                    final_df = pd.concat(st.session_state['live_data_chunks'], ignore_index=True)
                     
                     final_df.rename(columns={
                         'Pack_Size': 'Pack_Size_(ml/g)', 
@@ -417,20 +438,23 @@ if uploaded_files:
                     
                     st.session_state['audit_results'] = final_df
                     st.session_state['failed_files'] = failed_files
+                    st.session_state['live_data_chunks'] = [] # Clean up temp chunk memory
                 else:
                     st.error("❌ No data generated from this batch.")
 
 elif not api_key:
     st.warning("⚠️ Please enter your API Key in the sidebar or secrets to start.")
 
-# --- 10. DISPLAY PERSISTENT RESULTS ---
+# --- 10. DISPLAY PERSISTENT FINAL RESULTS ---
+# This block naturally protects against page refreshes or timeouts. 
+# If the loop crashed halfway through, the interim data would remain safely inside st.session_state['live_data_chunks']
 if st.session_state.get('audit_results') is not None:
-    st.success("✅ Audit Complete & Data Saved to Memory!")
+    st.success("✅ Audit Complete & Data Saved!")
     
     if st.session_state['failed_files']:
         st.warning(f"⚠️ The following images were excluded due to API timeouts or unreadable data: {', '.join(st.session_state['failed_files'])}")
         
-    st.write("### 📊 Audit Data Preview")
+    st.write("### 📊 Final Audit Data Preview")
     st.dataframe(st.session_state['audit_results'].style.apply(highlight_low_confidence, axis=1))
     
     csv = st.session_state['audit_results'].to_csv(index=False).encode('utf-8')
@@ -448,3 +472,37 @@ if st.session_state.get('audit_results') is not None:
             st.session_state['audit_results'] = None
             st.session_state['failed_files'] = []
             st.rerun()
+
+# --- 11. CRASH RECOVERY BLOCK ---
+# If the app crashed mid-loop due to a browser timeout, but some data was saved in chunks, we render it here!
+elif len(st.session_state.get('live_data_chunks', [])) > 0:
+    st.warning("⚠️ Processing was interrupted (likely due to a browser tab sleeping/disconnecting). Showing partial results recovered from memory.")
+    
+    interim_df = pd.concat(st.session_state['live_data_chunks'], ignore_index=True)
+    
+    if 'Pack_Size' in interim_df.columns:
+        interim_df.rename(columns={'Pack_Size': 'Pack_Size_(ml/g)'}, inplace=True)
+    if 'Price' in interim_df.columns:
+        interim_df.rename(columns={'Price': 'Price (local)'}, inplace=True)
+        
+    desired_order = [
+        "Image_Name", "Country", "City", "Retailer", "Category", 
+        "Product_Name", "Brand", "Manufacturer", 
+        "Pack_Size_(ml/g)", "Quantity", "Price (local)", "Promo", 
+        "Position", "Facings", "Confidence"
+    ]
+    for col in desired_order:
+        if col not in interim_df.columns:
+            interim_df[col] = ""
+            
+    interim_df = interim_df[desired_order]
+    
+    st.dataframe(interim_df.style.apply(highlight_low_confidence, axis=1))
+    
+    csv = interim_df.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="📥 Download Partial Report",
+        data=csv,
+        file_name="partial_ai_shelf_data.csv",
+        mime="text/csv"
+    )
