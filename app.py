@@ -9,6 +9,8 @@ import re
 import json
 import gc
 import zipfile
+import tempfile
+import os
 
 # --- 1. PAGE CONFIGURATION ---
 st.set_page_config(page_title="AI Shelf Intelligence", page_icon="🔍", layout="wide")
@@ -42,7 +44,7 @@ def check_password():
 if not check_password():
     st.stop()
 
-# --- 3. SESSION STATE INITIALIZATION (The Safety Net) ---
+# --- 3. SESSION STATE INITIALIZATION ---
 if 'audit_results' not in st.session_state:
     st.session_state['audit_results'] = None
 if 'failed_files' not in st.session_state:
@@ -222,10 +224,11 @@ def standardize_and_fix_prices(df):
     df = df.drop(columns=['Clean_Price'])
     return df
 
-# --- 7. OPTIMIZED HIGH-DEFINITION IMAGE & ZIP PROCESSOR ---
-def prepare_image(uploaded_file):
+# --- 7. DISK-SPOOLING IMAGE PROCESSOR ---
+# NEW: Changed to accept a file path from the hard drive instead of raw memory bytes
+def prepare_image(image_path):
     try:
-        with Image.open(uploaded_file) as image:
+        with Image.open(image_path) as image:
             if image.mode != 'RGB':
                 image = image.convert('RGB')
             
@@ -236,8 +239,9 @@ def prepare_image(uploaded_file):
     except Exception as e:
         return None
 
-def extract_images_from_uploads(uploaded_files):
-    extracted_images = []
+# NEW: Extracts ZIP files to a hidden temporary folder on the server's hard drive
+def extract_to_disk(uploaded_files, temp_dir):
+    extracted_files = []
     for file in uploaded_files:
         if file.name.lower().endswith('.zip'):
             with zipfile.ZipFile(file) as z:
@@ -246,14 +250,17 @@ def extract_images_from_uploads(uploaded_files):
                         continue
                     
                     if info.filename.lower().endswith(('.jpg', '.jpeg', '.png')):
-                        file_bytes = z.read(info.filename)
-                        pseudo_file = io.BytesIO(file_bytes)
-                        pseudo_file.name = info.filename.split('/')[-1]
-                        extracted_images.append(pseudo_file)
+                        z.extract(info, temp_dir)
+                        extracted_path = os.path.join(temp_dir, info.filename)
+                        clean_name = info.filename.split('/')[-1]
+                        extracted_files.append({"name": clean_name, "path": extracted_path})
         else:
-            extracted_images.append(file)
+            path = os.path.join(temp_dir, file.name)
+            with open(path, 'wb') as f:
+                f.write(file.getbuffer())
+            extracted_files.append({"name": file.name, "path": path})
             
-    return extracted_images
+    return extracted_files
 
 # --- 8. MAIN APP LOGIC ---
 st.title("🔍 AI Shelf Intelligence")
@@ -261,159 +268,162 @@ st.title("🔍 AI Shelf Intelligence")
 uploaded_files = st.file_uploader("Upload Shelf Images or a .zip file (Max 250 images total)", type=['jpg', 'jpeg', 'png', 'zip'], accept_multiple_files=True)
 
 if uploaded_files:
-    image_files = extract_images_from_uploads(uploaded_files)
-    
-    if len(image_files) > 250:
-        st.error(f"🛑 **Upload Limit Exceeded!** Your upload contains {len(image_files)} images. Please upload a maximum of 250 images at a time.")
-        st.stop()
-    elif len(image_files) == 0:
-        st.warning("⚠️ No valid images (.jpg, .jpeg, .png) were found in the upload.")
-        st.stop()
+    # NEW: Create a temporary directory on the hard drive that automatically deletes itself when done
+    with tempfile.TemporaryDirectory() as temp_dir:
+        image_files = extract_to_disk(uploaded_files, temp_dir)
+        
+        if len(image_files) > 250:
+            st.error(f"🛑 **Upload Limit Exceeded!** Your upload contains {len(image_files)} images. Please upload a maximum of 250 images at a time.")
+            st.stop()
+        elif len(image_files) == 0:
+            st.warning("⚠️ No valid images (.jpg, .jpeg, .png) were found in the upload.")
+            st.stop()
 
-    if api_key:
-        if st.button(f"Start Audit ({len(image_files)} Images)"):
-            
-            # Clear previous results before starting a new batch
-            st.session_state['audit_results'] = None
-            st.session_state['failed_files'] = []
-            
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('gemini-2.0-flash')
-            
-            all_products = []
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            total_files = len(image_files)
-            failed_files = []
-            
-            for i, file in enumerate(image_files):
-                max_retries = 3
-                status_text.write(f"Analyzing {i+1}/{total_files}: **{file.name}**")
+        if api_key:
+            if st.button(f"Start Audit ({len(image_files)} Images)"):
                 
-                for attempt in range(max_retries):
-                    try:
-                        retailer, city = parse_filename(file.name)
-                        image_bytes = prepare_image(file)
-                        
-                        if image_bytes:
-                            response = model.generate_content(
-                                [SYSTEM_PROMPT + f"\nContext: This store is in {city}, {retailer}.",
-                                 {"mime_type": "image/jpeg", "data": image_bytes}],
-                                generation_config={
-                                    "response_mime_type": "application/json",
-                                    "temperature": 0.4,
-                                    "max_output_tokens": 8192
-                                },
-                                request_options={"timeout": 600} 
-                            )
+                st.session_state['audit_results'] = None
+                st.session_state['failed_files'] = []
+                
+                genai.configure(api_key=api_key)
+                model = genai.GenerativeModel('gemini-2.0-flash')
+                
+                all_products = []
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                total_files = len(image_files)
+                failed_files = []
+                
+                for i, file_info in enumerate(image_files):
+                    file_name = file_info["name"]
+                    file_path = file_info["path"]
+                    
+                    max_retries = 3
+                    status_text.write(f"Analyzing {i+1}/{total_files}: **{file_name}**")
+                    
+                    for attempt in range(max_retries):
+                        try:
+                            retailer, city = parse_filename(file_name)
+                            # Loads exactly one image from disk into memory
+                            image_bytes = prepare_image(file_path)
                             
-                            if response.text:
-                                try:
-                                    raw_text = response.text.strip()
-                                    if raw_text.startswith("```json"):
-                                        raw_text = raw_text[7:]
-                                    elif raw_text.startswith("```"):
-                                        raw_text = raw_text[3:]
-                                    if raw_text.endswith("```"):
-                                        raw_text = raw_text[:-3]
-                                    raw_text = raw_text.strip()
-                                    
-                                    parsed_json = json.loads(raw_text)
-                                    
-                                    if isinstance(parsed_json, dict):
-                                        for key, value in parsed_json.items():
-                                            if isinstance(value, list):
-                                                parsed_json = value
-                                                break
-                                    
-                                    df_chunk = pd.DataFrame(parsed_json)
-                                    
-                                    if not df_chunk.empty:
-                                        df_chunk['Image_Name'] = file.name
-                                        df_chunk['Retailer'] = retailer
-                                        df_chunk['City'] = city
+                            if image_bytes:
+                                response = model.generate_content(
+                                    [SYSTEM_PROMPT + f"\nContext: This store is in {city}, {retailer}.",
+                                     {"mime_type": "image/jpeg", "data": image_bytes}],
+                                    generation_config={
+                                        "response_mime_type": "application/json",
+                                        "temperature": 0.4,
+                                        "max_output_tokens": 8192
+                                    },
+                                    request_options={"timeout": 600} 
+                                )
+                                
+                                if response.text:
+                                    try:
+                                        raw_text = response.text.strip()
+                                        if raw_text.startswith("```json"):
+                                            raw_text = raw_text[7:]
+                                        elif raw_text.startswith("```"):
+                                            raw_text = raw_text[3:]
+                                        if raw_text.endswith("```"):
+                                            raw_text = raw_text[:-3]
+                                        raw_text = raw_text.strip()
                                         
-                                        if 'Pack_Size' in df_chunk.columns:
-                                            df_chunk['Pack_Size'] = df_chunk['Pack_Size'].apply(standardize_pack_size)
-                                        df_chunk = standardize_and_fix_prices(df_chunk)
+                                        parsed_json = json.loads(raw_text)
                                         
-                                        all_products.append(df_chunk)
+                                        if isinstance(parsed_json, dict):
+                                            for key, value in parsed_json.items():
+                                                if isinstance(value, list):
+                                                    parsed_json = value
+                                                    break
                                         
-                                        del image_bytes
-                                        del response
-                                        del parsed_json
-                                        gc.collect()
+                                        df_chunk = pd.DataFrame(parsed_json)
                                         
-                                        time.sleep(4)
-                                        break 
-                                        
-                                    else:
+                                        if not df_chunk.empty:
+                                            df_chunk['Image_Name'] = file_name
+                                            df_chunk['Retailer'] = retailer
+                                            df_chunk['City'] = city
+                                            
+                                            if 'Pack_Size' in df_chunk.columns:
+                                                df_chunk['Pack_Size'] = df_chunk['Pack_Size'].apply(standardize_pack_size)
+                                            df_chunk = standardize_and_fix_prices(df_chunk)
+                                            
+                                            all_products.append(df_chunk)
+                                            
+                                            # Wipes the memory clean before the next loop
+                                            del image_bytes
+                                            del response
+                                            del parsed_json
+                                            gc.collect()
+                                            
+                                            time.sleep(4)
+                                            break 
+                                            
+                                        else:
+                                            if attempt == max_retries - 1:
+                                                failed_files.append(file_name)
+                                            else:
+                                                time.sleep(2)
+                                                continue
+                                                
+                                    except Exception as parse_error:
                                         if attempt == max_retries - 1:
-                                            failed_files.append(file.name)
+                                            failed_files.append(file_name)
                                         else:
                                             time.sleep(2)
                                             continue
                                             
-                                except Exception as parse_error:
-                                    if attempt == max_retries - 1:
-                                        failed_files.append(file.name)
-                                    else:
-                                        time.sleep(2)
-                                        continue
-                                        
-                    except Exception as e:
-                        if attempt < max_retries - 1:
-                            error_msg = str(e).lower()
-                            if "429" in error_msg or "quota" in error_msg:
-                                time.sleep(15) 
-                            elif "timeout" in error_msg or "503" in error_msg or "504" in error_msg:
-                                time.sleep(10 * (attempt + 1)) 
+                        except Exception as e:
+                            if attempt < max_retries - 1:
+                                error_msg = str(e).lower()
+                                if "429" in error_msg or "quota" in error_msg:
+                                    time.sleep(15) 
+                                elif "timeout" in error_msg or "503" in error_msg or "504" in error_msg:
+                                    time.sleep(10 * (attempt + 1)) 
+                                else:
+                                    time.sleep(5)  
                             else:
-                                time.sleep(5)  
-                        else:
-                            failed_files.append(file.name)
-                            break 
+                                failed_files.append(file_name)
+                                break 
+                    
+                    progress_bar.progress((i + 1) / total_files)
+                    
+                # --- 9. SAVE RESULTS TO MEMORY ---
+                status_text.empty() 
+                progress_bar.empty() 
                 
-                progress_bar.progress((i + 1) / total_files)
-                
-            # --- 8. SAVE RESULTS TO MEMORY (No Display Here) ---
-            status_text.empty() 
-            progress_bar.empty() 
-            
-            if all_products:
-                final_df = pd.concat(all_products, ignore_index=True)
-                
-                final_df.rename(columns={
-                    'Pack_Size': 'Pack_Size_(ml/g)', 
-                    'Price': 'Price (local)'
-                }, inplace=True)
-                
-                desired_order = [
-                    "Image_Name", "Country", "City", "Retailer", "Category", 
-                    "Product_Name", "Brand", "Manufacturer", 
-                    "Pack_Size_(ml/g)", "Quantity", "Price (local)", "Promo", 
-                    "Position", "Facings", "Confidence"
-                ]
-                
-                for col in desired_order:
-                    if col not in final_df.columns:
-                        final_df[col] = ""
-                
-                final_df = final_df[desired_order]
-                
-                # Save the final table to memory so the Display Block can handle it
-                st.session_state['audit_results'] = final_df
-                st.session_state['failed_files'] = failed_files
-            else:
-                st.error("❌ No data generated from this batch.")
+                if all_products:
+                    final_df = pd.concat(all_products, ignore_index=True)
+                    
+                    final_df.rename(columns={
+                        'Pack_Size': 'Pack_Size_(ml/g)', 
+                        'Price': 'Price (local)'
+                    }, inplace=True)
+                    
+                    desired_order = [
+                        "Image_Name", "Country", "City", "Retailer", "Category", 
+                        "Product_Name", "Brand", "Manufacturer", 
+                        "Pack_Size_(ml/g)", "Quantity", "Price (local)", "Promo", 
+                        "Position", "Facings", "Confidence"
+                    ]
+                    
+                    for col in desired_order:
+                        if col not in final_df.columns:
+                            final_df[col] = ""
+                    
+                    final_df = final_df[desired_order]
+                    
+                    st.session_state['audit_results'] = final_df
+                    st.session_state['failed_files'] = failed_files
+                else:
+                    st.error("❌ No data generated from this batch.")
 
 elif not api_key:
     st.warning("⚠️ Please enter your API Key in the sidebar or secrets to start.")
 
-# --- 9. DISPLAY PERSISTENT RESULTS ---
-# This block is completely separated from the "Start Audit" button logic. 
-# Once the memory is filled, this block will permanently display the results until cleared.
+# --- 10. DISPLAY PERSISTENT RESULTS ---
 if st.session_state.get('audit_results') is not None:
     st.success("✅ Audit Complete & Data Saved to Memory!")
     
