@@ -377,9 +377,9 @@ if uploaded_files:
                 
                 progress_bar.progress((i + 1) / total_files)
                 
-            # --- SAVE TO SESSION STATE ONCE BATCH IS COMPLETE ---
-            status_text.empty() # Clear the "Analyzing..." text
-            progress_bar.empty() # Clear the progress bar
+            # --- 8. SAVE RESULTS TO MEMORY (No Display Here) ---
+            status_text.empty() 
+            progress_bar.empty() 
             
             if all_products:
                 final_df = pd.concat(all_products, ignore_index=True)
@@ -402,7 +402,7 @@ if uploaded_files:
                 
                 final_df = final_df[desired_order]
                 
-                # Save the final table and any failed files to the app's persistent memory
+                # Save the final table to memory so the Display Block can handle it
                 st.session_state['audit_results'] = final_df
                 st.session_state['failed_files'] = failed_files
             else:
@@ -412,7 +412,8 @@ elif not api_key:
     st.warning("⚠️ Please enter your API Key in the sidebar or secrets to start.")
 
 # --- 9. DISPLAY PERSISTENT RESULTS ---
-# This block runs every time the page refreshes, keeping your data safely on the screen
+# This block is completely separated from the "Start Audit" button logic. 
+# Once the memory is filled, this block will permanently display the results until cleared.
 if st.session_state.get('audit_results') is not None:
     st.success("✅ Audit Complete & Data Saved to Memory!")
     
