@@ -62,7 +62,7 @@ with st.sidebar:
     st.write("### 📝 Instructions")
     st.markdown("""
     1. **Rename files** as: `Retailer-City-ShelfID.jpg`
-    2. Upload up to **100 images** (or a `.zip` folder).
+    2. Upload up to **250 images** (or a `.zip` folder).
     3. Click **Start Audit**.
     4. Download the Excel report.
     """)
@@ -252,13 +252,15 @@ def extract_images_from_uploads(uploaded_files):
 # --- 7. MAIN APP LOGIC ---
 st.title("🔍 AI Shelf Intelligence")
 
-uploaded_files = st.file_uploader("Upload Shelf Images or a .zip file (Max 100 images total)", type=['jpg', 'jpeg', 'png', 'zip'], accept_multiple_files=True)
+# UPDATED: Max 250 limit specified in the UI
+uploaded_files = st.file_uploader("Upload Shelf Images or a .zip file (Max 250 images total)", type=['jpg', 'jpeg', 'png', 'zip'], accept_multiple_files=True)
 
 if uploaded_files:
     image_files = extract_images_from_uploads(uploaded_files)
     
-    if len(image_files) > 100:
-        st.error(f"🛑 **Upload Limit Exceeded!** Your upload contains {len(image_files)} images. Please upload a maximum of 100 images at a time.")
+    # UPDATED: Hard limit raised to 250
+    if len(image_files) > 250:
+        st.error(f"🛑 **Upload Limit Exceeded!** Your upload contains {len(image_files)} images. Please upload a maximum of 250 images at a time.")
         st.stop()
     elif len(image_files) == 0:
         st.warning("⚠️ No valid images (.jpg, .jpeg, .png) were found in the upload.")
@@ -287,10 +289,6 @@ if uploaded_files:
                         image_bytes = prepare_image(file)
                         
                         if image_bytes:
-                            # OPTIMIZATION: 
-                            # Set temperature to 0.4. This is the perfect middle ground between the 
-                            # default (1.0) and rigid (0.0). It will be fast, skip unreadable smudges, 
-                            # but remain highly accurate to the taxonomy.
                             response = model.generate_content(
                                 [SYSTEM_PROMPT + f"\nContext: This store is in {city}, {retailer}.",
                                  {"mime_type": "image/jpeg", "data": image_bytes}],
