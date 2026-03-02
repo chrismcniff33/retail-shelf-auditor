@@ -42,7 +42,13 @@ def check_password():
 if not check_password():
     st.stop()
 
-# --- 3. SIDEBAR & API SETUP ---
+# --- 3. SESSION STATE INITIALIZATION (The Safety Net) ---
+if 'audit_results' not in st.session_state:
+    st.session_state['audit_results'] = None
+if 'failed_files' not in st.session_state:
+    st.session_state['failed_files'] = []
+
+# --- 4. SIDEBAR & API SETUP ---
 with st.sidebar:
     st.header("⚙️ Settings")
     if 'GOOGLE_API_KEY' in st.secrets:
@@ -67,7 +73,7 @@ with st.sidebar:
     4. Download the Excel report.
     """)
 
-# --- 4. SYSTEM PROMPT ---
+# --- 5. SYSTEM PROMPT ---
 SYSTEM_PROMPT = """
 You are a global retail data expert strictly adhering to Euromonitor category definitions. Analyze this shelf image. 
 Context: The image filename suggests the retailer and city.
@@ -117,7 +123,7 @@ Task: Extract all visible products and return a JSON list of objects with these 
 12. "Confidence": 'High' if text is clearly readable, 'Low' if blurry or if Pack_Size was visually estimated.
 """
 
-# --- 5. HELPER FUNCTIONS ---
+# --- 6. HELPER FUNCTIONS ---
 def parse_filename(filename):
     try:
         name = filename.rsplit('.', 1)[0]
@@ -216,7 +222,7 @@ def standardize_and_fix_prices(df):
     df = df.drop(columns=['Clean_Price'])
     return df
 
-# --- 6. OPTIMIZED HIGH-DEFINITION IMAGE & ZIP PROCESSOR ---
+# --- 7. OPTIMIZED HIGH-DEFINITION IMAGE & ZIP PROCESSOR ---
 def prepare_image(uploaded_file):
     try:
         with Image.open(uploaded_file) as image:
@@ -249,16 +255,14 @@ def extract_images_from_uploads(uploaded_files):
             
     return extracted_images
 
-# --- 7. MAIN APP LOGIC ---
+# --- 8. MAIN APP LOGIC ---
 st.title("🔍 AI Shelf Intelligence")
 
-# UPDATED: Max 250 limit specified in the UI
 uploaded_files = st.file_uploader("Upload Shelf Images or a .zip file (Max 250 images total)", type=['jpg', 'jpeg', 'png', 'zip'], accept_multiple_files=True)
 
 if uploaded_files:
     image_files = extract_images_from_uploads(uploaded_files)
     
-    # UPDATED: Hard limit raised to 250
     if len(image_files) > 250:
         st.error(f"🛑 **Upload Limit Exceeded!** Your upload contains {len(image_files)} images. Please upload a maximum of 250 images at a time.")
         st.stop()
@@ -268,6 +272,10 @@ if uploaded_files:
 
     if api_key:
         if st.button(f"Start Audit ({len(image_files)} Images)"):
+            
+            # Clear previous results before starting a new batch
+            st.session_state['audit_results'] = None
+            st.session_state['failed_files'] = []
             
             genai.configure(api_key=api_key)
             model = genai.GenerativeModel('gemini-2.0-flash')
@@ -369,7 +377,10 @@ if uploaded_files:
                 
                 progress_bar.progress((i + 1) / total_files)
                 
-            # --- 8. FINAL TABLE ---
+            # --- SAVE TO SESSION STATE ONCE BATCH IS COMPLETE ---
+            status_text.empty() # Clear the "Analyzing..." text
+            progress_bar.empty() # Clear the progress bar
+            
             if all_products:
                 final_df = pd.concat(all_products, ignore_index=True)
                 
@@ -391,23 +402,38 @@ if uploaded_files:
                 
                 final_df = final_df[desired_order]
                 
-                st.success("✅ Audit Complete!")
-                
-                if failed_files:
-                    st.warning(f"⚠️ The following images were excluded due to API timeouts or unreadable data: {', '.join(failed_files)}")
-                    
-                st.write("### 📊 Audit Data Preview")
-                st.dataframe(final_df.style.apply(highlight_low_confidence, axis=1))
-                
-                csv = final_df.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label="📥 Download Excel/CSV Report",
-                    data=csv,
-                    file_name="ai_shelf_intelligence_data.csv",
-                    mime="text/csv"
-                )
+                # Save the final table and any failed files to the app's persistent memory
+                st.session_state['audit_results'] = final_df
+                st.session_state['failed_files'] = failed_files
             else:
                 st.error("❌ No data generated from this batch.")
 
 elif not api_key:
     st.warning("⚠️ Please enter your API Key in the sidebar or secrets to start.")
+
+# --- 9. DISPLAY PERSISTENT RESULTS ---
+# This block runs every time the page refreshes, keeping your data safely on the screen
+if st.session_state.get('audit_results') is not None:
+    st.success("✅ Audit Complete & Data Saved to Memory!")
+    
+    if st.session_state['failed_files']:
+        st.warning(f"⚠️ The following images were excluded due to API timeouts or unreadable data: {', '.join(st.session_state['failed_files'])}")
+        
+    st.write("### 📊 Audit Data Preview")
+    st.dataframe(st.session_state['audit_results'].style.apply(highlight_low_confidence, axis=1))
+    
+    csv = st.session_state['audit_results'].to_csv(index=False).encode('utf-8')
+    
+    col1, col2 = st.columns([1, 4])
+    with col1:
+        st.download_button(
+            label="📥 Download Excel/CSV Report",
+            data=csv,
+            file_name="ai_shelf_intelligence_data.csv",
+            mime="text/csv"
+        )
+    with col2:
+        if st.button("🗑️ Clear Results & Start Fresh"):
+            st.session_state['audit_results'] = None
+            st.session_state['failed_files'] = []
+            st.rerun()
