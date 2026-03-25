@@ -49,7 +49,6 @@ if 'audit_results' not in st.session_state:
     st.session_state['audit_results'] = None
 if 'failed_files' not in st.session_state:
     st.session_state['failed_files'] = []
-# NEW: Persistent list to hold data continuously during the loop
 if 'live_data_chunks' not in st.session_state:
     st.session_state['live_data_chunks'] = []
 
@@ -67,7 +66,7 @@ with st.sidebar:
     st.divider()
     
     st.subheader("💰 Cost & Usage")
-    st.info("Approx. $0.35 per 1,000 image files processed.")
+    st.info("Approx. $0.60 per 1,000 image files processed.")
     
     st.divider()
     st.write("### 📝 Instructions")
@@ -84,7 +83,7 @@ SYSTEM_PROMPT = """
 You are a global retail data expert strictly adhering to Euromonitor category definitions. Analyze this shelf image. 
 Context: The image filename suggests the retailer and city.
 
-CRITICAL INSTRUCTION: This is a highly dense display. Scan the image systematically (top-to-bottom, left-to-right) to ensure absolutely ZERO products are missed. 
+CRITICAL INSTRUCTION: Scan systematically (top-to-bottom, left-to-right) to ensure absolutely ZERO products are missed. 
 
 CRITICAL JSON INSTRUCTIONS:
 - You MUST output a strictly valid JSON array of objects.
@@ -108,25 +107,27 @@ TGI Group: Chivita, Hollandia.
 Aje Group: Big Cola, Cifrut, Sporade, Cielo, Pulp.
 --- END DICTIONARY ---
 
-Task: Extract all visible products and return a JSON list of objects with these exact keys:
+Task: Extract all visible products and return a JSON list of objects with these exact keys. For ANY unknown value, return an empty string ('').
 
 1. "Product_Name": Specific name on label.
 2. "Brand": Brand name.
-3. "Manufacturer": Refer to the DICTIONARY above. If missing, use internal knowledge.
-4. "Category": 
-   - FOR SOFT DRINKS: 'Still Natural Mineral Bottled Water', 'Carbonated Purified Bottled Water', 'Still Flavoured Bottled Water', 'Sparkling Flavoured Bottled Water', 'Functional Bottled Water', 'Regular Cola Carbonates', 'Reduced Sugar Cola Carbonates', 'Regular Lemonade/Lime', 'Regular Orange Carbonates', 'Regular Tonic Water/Mixers/Other Bitters', 'Regular Other Non-Cola Carbonates', 'Liquid Concentrates', '100% Juice', 'Nectars', 'Juice Drinks (up to 24% Juice)', 'Coconut and Other Plant Waters', 'Regular Still RTD Tea', 'Carbonated RTD Tea and Kombucha', 'RTD Coffee', 'Regular Energy Drinks', 'Regular Sports Drinks', 'Asian Speciality Drinks'.
-   - FOR ALCOHOLIC DRINKS: 'Lager', 'Dark Beer', 'Stout', 'Non/Low Alcohol Beer', 'Cider/Perry', 'Malt-based RTDs', 'Spirit-based RTDs', 'Wine-based RTDs', 'Blended Scotch Whisky', 'Single Malt Scotch Whisky', 'Bourbon/Other US Whiskey', 'Cognac', 'Brandy', 'Gin', 'Vodka', 'Dark Rum', 'White Rum', 'Tequila', 'Liqueurs', 'Still Red Wine', 'Still White Wine', 'Still Rosé Wine', 'Champagne', 'Other Sparkling Wine', 'Fortified Wine and Vermouth'.
-   - FOR SNACKS: 'Tablets', 'Countlines', 'Chocolate Pouches and Bags', 'Boxed Assortments', 'Boiled Sweets', 'Chewy Candies', 'Gummies and Jellies', 'Mints', 'Toffees, Caramels and Nougat', 'Chewing Gum', 'Potato Chips', 'Tortilla Chips', 'Puffed Snacks', 'Nuts, Seeds and Trail Mixes', 'Popcorn', 'Pretzels', 'Cereal Bars', 'Protein/Energy Bars', 'Cookies', 'Chocolate Coated Biscuits', 'Filled Biscuits', 'Plain Biscuits', 'Wafers'.
-   - FOR DAIRY: 'Butter', 'Margarine and Spreads', 'Spreadable Cheese', 'Processed Cheese', 'Hard Cheese', 'Soft Cheese', 'Flavoured Milk Drinks', 'Fresh Milk', 'Shelf Stable Milk', 'Powder Milk', 'Drinking Yoghurt', 'Flavoured Yoghurt', 'Plain Yoghurt', 'Soy Drinks', 'Other Plant-based Milk'.
-   - FOR OTHER FMCG: Map to the most GRANULAR Euromonitor category possible.
+3. "Manufacturer": Refer to the DICTIONARY above. 
+4. "Category": Map to the most GRANULAR Euromonitor category possible.
 5. "Country": Identify the Country based on the City/Retailer provided.
-6. "Pack_Size": Return strictly as a NUMBER. Convert all soft drinks to milliliters (ml) (e.g., 1.5L = 1500, 330ml = 330). Convert all solid foods to grams (g). ESTIMATE volume in ml/g using visual spatial reasoning if unreadable. Do not write 'ml' or 'g'.
+6. "Pack_Size": Convert soft drinks to ml, solid foods to g. Numbers ONLY. If unreadable, estimate. If impossible, write ''.
 7. "Quantity": Unit count if visible. Else '1'.
-8. "Price": Price on tag. Write numbers only. If missing, write 'N/A'.
-9. "Promo": Description of any promo tag. If none, write ''.
-10. "Position": Shelf level (Top/Middle/Bottom).
-11. "Facings": Integer count of identical items side-by-side.
-12. "Confidence": 'High' if text is clearly readable, 'Low' if blurry or if Pack_Size was visually estimated.
+8. "Price": Tag price. Numbers ONLY. If missing, write ''.
+9. "Promo": Promo tag description. If none, write ''.
+10. "Pack_Type": MAX 3 WORDS (e.g., Plastic Bottle, Aluminum Can, Cardboard Box).
+11. "Pack_Material": MAX 3 WORDS (e.g., Clear Plastic, Colored Glass, Metal).
+12. "Pack_Colour": MAX 3 WORDS (e.g., Red and White, Dark Blue).
+13. "Flavour": MAX 3 WORDS (e.g., Cherry Vanilla, Original). If none, write ''.
+14. "Ingredients": DATA ENRICHMENT TASK. Rely exclusively on pre-trained knowledge. List the ingredients. Do NOT web search. If unknown, write ''.
+15. "Calories": DATA ENRICHMENT TASK. Rely exclusively on pre-trained knowledge. MAX 3 WORDS (e.g., 45 kcal/100ml). Do NOT web search. If unknown, write ''.
+16. "On_pack_claims": Extract any visible claims regarding health, taste, sustainability on the package (e.g., 'Zero Sugar', '100% Recyclable'). If none, write ''.
+17. "Position": Shelf level (Top/Middle/Bottom).
+18. "Facings": Integer count of identical items side-by-side.
+19. "Confidence": 'High' if text is clearly readable, 'Low' if blurry/estimated.
 """
 
 # --- 6. HELPER FUNCTIONS ---
@@ -141,15 +142,15 @@ def parse_filename(filename):
         return "Unknown", "Unknown"
 
 def highlight_low_confidence(row):
-    val = row.get('Confidence', '')
+    val = row.get('Confidence level', '')
     if isinstance(val, str) and val.lower() == 'low':
         return ['background-color: #fff3cd'] * len(row)
     return [''] * len(row)
 
 def standardize_pack_size(val):
     s = str(val).strip().lower()
-    if s in ['n/a', 'nan', 'none', '', 'null']: 
-        return 'N/A'
+    if s in ['n/a', 'nan', 'none', '', 'null', 'unknown']: 
+        return ''
     
     multiplier = 1
     if 'ml' in s:
@@ -167,8 +168,8 @@ def standardize_pack_size(val):
             num = float(num_match.group()) * multiplier
             return str(int(num)) if num.is_integer() else str(num)
         except ValueError:
-            return 'N/A'
-    return 'N/A'
+            return ''
+    return ''
 
 def standardize_and_fix_prices(df):
     if 'Price' not in df.columns:
@@ -176,7 +177,7 @@ def standardize_and_fix_prices(df):
         
     def extract_number(val):
         s = str(val).strip()
-        if s.upper() in ['N/A', 'NAN', 'NONE', '']: 
+        if s.upper() in ['N/A', 'NAN', 'NONE', '', 'UNKNOWN']: 
             return None
         s = re.sub(r'[^\d.,]', '', s)
         if not s: 
@@ -218,7 +219,7 @@ def standardize_and_fix_prices(df):
     
     def format_price(p):
         if pd.isna(p): 
-            return 'N/A'
+            return ''
         if p.is_integer() and p > 100:
             return str(int(p))
         else:
@@ -283,7 +284,6 @@ if uploaded_files:
         if api_key:
             if st.button(f"Start Audit ({len(image_files)} Images)"):
                 
-                # Reset Session States
                 st.session_state['audit_results'] = None
                 st.session_state['failed_files'] = []
                 st.session_state['live_data_chunks'] = []
@@ -291,7 +291,6 @@ if uploaded_files:
                 genai.configure(api_key=api_key)
                 model = genai.GenerativeModel('gemini-2.0-flash')
                 
-                # --- NEW: UI PLACEHOLDERS FOR LIVE UPDATING ---
                 st.write("### ⏱️ Live Processing Progress")
                 progress_bar = st.progress(0)
                 status_text = st.empty()
@@ -346,26 +345,47 @@ if uploaded_files:
                                         df_chunk = pd.DataFrame(parsed_json)
                                         
                                         if not df_chunk.empty:
-                                            df_chunk['Image_Name'] = file_name
+                                            # Filter out any lingering conversational defaults
+                                            df_chunk = df_chunk.replace(['N/A', 'n/a', 'Unknown', 'unknown', 'None'], '')
+
+                                            df_chunk['Image name'] = file_name
                                             df_chunk['Retailer'] = retailer
                                             df_chunk['City'] = city
                                             
+                                            expected_ai_cols = ["Country", "Category", "Product_Name", "Brand", "Manufacturer", "Pack_Size", "Quantity", "Price", "Promo", "Pack_Type", "Pack_Material", "Pack_Colour", "Flavour", "Ingredients", "Calories", "On_pack_claims", "Position", "Facings", "Confidence"]
+                                            for col in expected_ai_cols:
+                                                if col not in df_chunk.columns:
+                                                    df_chunk[col] = ""
+
                                             if 'Pack_Size' in df_chunk.columns:
                                                 df_chunk['Pack_Size'] = df_chunk['Pack_Size'].apply(standardize_pack_size)
                                             df_chunk = standardize_and_fix_prices(df_chunk)
                                             
-                                            # --- NEW: APPEND DIRECTLY TO SESSION STATE ---
+                                            df_chunk.rename(columns={
+                                                'Product_Name': 'Product name',
+                                                'Pack_Size': 'Pack size (ml/g)', 
+                                                'Price': 'Price (local currency)',
+                                                'Pack_Type': 'Pack type',
+                                                'Pack_Material': 'Pack material',
+                                                'Pack_Colour': 'Pack colour(s)',
+                                                'Flavour': 'Flavour(s)',
+                                                'Calories': 'Calories (kcal)',
+                                                'On_pack_claims': 'On-pack claims',
+                                                'Position': 'Shelf position',
+                                                'Confidence': 'Confidence level'
+                                            }, inplace=True)
+                                            
                                             st.session_state['live_data_chunks'].append(df_chunk)
                                             
-                                            # Build & display the interim table so far
                                             interim_df = pd.concat(st.session_state['live_data_chunks'], ignore_index=True)
                                             
-                                            # Ensure formatting is clean for the live display
                                             desired_order = [
-                                                "Image_Name", "Country", "City", "Retailer", "Category", 
-                                                "Product_Name", "Brand", "Manufacturer", 
-                                                "Pack_Size", "Quantity", "Price", "Promo", 
-                                                "Position", "Facings", "Confidence"
+                                                "Image name", "Country", "City", "Retailer", "Category", 
+                                                "Product name", "Brand", "Manufacturer", 
+                                                "Pack size (ml/g)", "Quantity", "Price (local currency)", "Promo", 
+                                                "Pack type", "Pack material", "Pack colour(s)", "Flavour(s)", 
+                                                "Ingredients", "Calories (kcal)", "On-pack claims", 
+                                                "Shelf position", "Facings", "Confidence level"
                                             ]
                                             for col in desired_order:
                                                 if col not in interim_df.columns:
@@ -413,21 +433,18 @@ if uploaded_files:
                 # --- 9. BATCH FINISHED: FORMAT FINAL MEMORY STATE ---
                 status_text.empty() 
                 progress_bar.empty() 
-                live_table_placeholder.empty() # Clear the temporary live table
+                live_table_placeholder.empty() 
                 
                 if st.session_state['live_data_chunks']:
                     final_df = pd.concat(st.session_state['live_data_chunks'], ignore_index=True)
                     
-                    final_df.rename(columns={
-                        'Pack_Size': 'Pack_Size_(ml/g)', 
-                        'Price': 'Price (local)'
-                    }, inplace=True)
-                    
                     desired_order = [
-                        "Image_Name", "Country", "City", "Retailer", "Category", 
-                        "Product_Name", "Brand", "Manufacturer", 
-                        "Pack_Size_(ml/g)", "Quantity", "Price (local)", "Promo", 
-                        "Position", "Facings", "Confidence"
+                        "Image name", "Country", "City", "Retailer", "Category", 
+                        "Product name", "Brand", "Manufacturer", 
+                        "Pack size (ml/g)", "Quantity", "Price (local currency)", "Promo", 
+                        "Pack type", "Pack material", "Pack colour(s)", "Flavour(s)", 
+                        "Ingredients", "Calories (kcal)", "On-pack claims", 
+                        "Shelf position", "Facings", "Confidence level"
                     ]
                     
                     for col in desired_order:
@@ -438,7 +455,7 @@ if uploaded_files:
                     
                     st.session_state['audit_results'] = final_df
                     st.session_state['failed_files'] = failed_files
-                    st.session_state['live_data_chunks'] = [] # Clean up temp chunk memory
+                    st.session_state['live_data_chunks'] = [] 
                 else:
                     st.error("❌ No data generated from this batch.")
 
@@ -446,8 +463,6 @@ elif not api_key:
     st.warning("⚠️ Please enter your API Key in the sidebar or secrets to start.")
 
 # --- 10. DISPLAY PERSISTENT FINAL RESULTS ---
-# This block naturally protects against page refreshes or timeouts. 
-# If the loop crashed halfway through, the interim data would remain safely inside st.session_state['live_data_chunks']
 if st.session_state.get('audit_results') is not None:
     st.success("✅ Audit Complete & Data Saved!")
     
@@ -474,22 +489,18 @@ if st.session_state.get('audit_results') is not None:
             st.rerun()
 
 # --- 11. CRASH RECOVERY BLOCK ---
-# If the app crashed mid-loop due to a browser timeout, but some data was saved in chunks, we render it here!
 elif len(st.session_state.get('live_data_chunks', [])) > 0:
     st.warning("⚠️ Processing was interrupted (likely due to a browser tab sleeping/disconnecting). Showing partial results recovered from memory.")
     
     interim_df = pd.concat(st.session_state['live_data_chunks'], ignore_index=True)
     
-    if 'Pack_Size' in interim_df.columns:
-        interim_df.rename(columns={'Pack_Size': 'Pack_Size_(ml/g)'}, inplace=True)
-    if 'Price' in interim_df.columns:
-        interim_df.rename(columns={'Price': 'Price (local)'}, inplace=True)
-        
     desired_order = [
-        "Image_Name", "Country", "City", "Retailer", "Category", 
-        "Product_Name", "Brand", "Manufacturer", 
-        "Pack_Size_(ml/g)", "Quantity", "Price (local)", "Promo", 
-        "Position", "Facings", "Confidence"
+        "Image name", "Country", "City", "Retailer", "Category", 
+        "Product name", "Brand", "Manufacturer", 
+        "Pack size (ml/g)", "Quantity", "Price (local currency)", "Promo", 
+        "Pack type", "Pack material", "Pack colour(s)", "Flavour(s)", 
+        "Ingredients", "Calories (kcal)", "On-pack claims", 
+        "Shelf position", "Facings", "Confidence level"
     ]
     for col in desired_order:
         if col not in interim_df.columns:
