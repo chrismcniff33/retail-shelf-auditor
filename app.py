@@ -118,9 +118,9 @@ Task: Extract all visible products and return a JSON list of objects with these 
 7. "Quantity": Unit count if visible. Else '1'.
 8. "Price": Tag price. Numbers ONLY. If missing, write ''.
 9. "Promo": Promo tag description. If none, write ''.
-10. "Pack_Type": MAX 3 WORDS (e.g., Plastic Bottle, Aluminum Can, Cardboard Box).
-11. "Pack_Material": MAX 3 WORDS (e.g., Clear Plastic, Colored Glass, Metal).
-12. "Pack_Colour": MAX 3 WORDS (e.g., Red and White, Dark Blue).
+10. "Pack_Type": MAX 1 WORD. Identify the type of packaging ONLY (e.g., Bottle, Can, Carton, Box, Pouch). DO NOT mention the material (e.g., write 'Bottle' not 'Glass Bottle').
+11. "Pack_Material": MAX 1 WORD. Identify the material ONLY (e.g., Plastic, Glass, Metal, Aluminium, Cardboard). DO NOT mention colors or transparency (e.g., write 'Plastic' not 'Clear Plastic').
+12. "Pack_Colour": MAX 3 WORDS. Primary color(s) of the packaging (e.g., Red, Blue and Silver).
 13. "Flavour": MAX 3 WORDS (e.g., Cherry Vanilla, Original). If none, write ''.
 14. "Ingredients": DATA ENRICHMENT TASK. Rely exclusively on pre-trained knowledge. List the ingredients. Do NOT web search. If unknown, write ''.
 15. "Calories": DATA ENRICHMENT TASK. Rely exclusively on pre-trained knowledge. MAX 3 WORDS (e.g., 45 kcal/100ml). Do NOT web search. If unknown, write ''.
@@ -367,7 +367,7 @@ if uploaded_files:
                                                 'Price': 'Price (local currency)',
                                                 'Pack_Type': 'Pack type',
                                                 'Pack_Material': 'Pack material',
-                                                'Pack_Colour': 'Pack colour(s)',
+                                                'Pack_Colour': 'Main colour(s)',
                                                 'Flavour': 'Flavour(s)',
                                                 'Calories': 'Calories (kcal)',
                                                 'On_pack_claims': 'On-pack claims',
@@ -383,7 +383,7 @@ if uploaded_files:
                                                 "Image name", "Country", "City", "Retailer", "Category", 
                                                 "Product name", "Brand", "Manufacturer", 
                                                 "Pack size (ml/g)", "Quantity", "Price (local currency)", "Promo", 
-                                                "Pack type", "Pack material", "Pack colour(s)", "Flavour(s)", 
+                                                "Pack type", "Pack material", "Main colour(s)", "Flavour(s)", 
                                                 "Ingredients", "Calories (kcal)", "On-pack claims", 
                                                 "Shelf position", "Facings", "Confidence level"
                                             ]
@@ -442,7 +442,7 @@ if uploaded_files:
                         "Image name", "Country", "City", "Retailer", "Category", 
                         "Product name", "Brand", "Manufacturer", 
                         "Pack size (ml/g)", "Quantity", "Price (local currency)", "Promo", 
-                        "Pack type", "Pack material", "Pack colour(s)", "Flavour(s)", 
+                        "Pack type", "Pack material", "Main colour(s)", "Flavour(s)", 
                         "Ingredients", "Calories (kcal)", "On-pack claims", 
                         "Shelf position", "Facings", "Confidence level"
                     ]
@@ -498,7 +498,7 @@ elif len(st.session_state.get('live_data_chunks', [])) > 0:
         "Image name", "Country", "City", "Retailer", "Category", 
         "Product name", "Brand", "Manufacturer", 
         "Pack size (ml/g)", "Quantity", "Price (local currency)", "Promo", 
-        "Pack type", "Pack material", "Pack colour(s)", "Flavour(s)", 
+        "Pack type", "Pack material", "Main colour(s)", "Flavour(s)", 
         "Ingredients", "Calories (kcal)", "On-pack claims", 
         "Shelf position", "Facings", "Confidence level"
     ]
