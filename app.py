@@ -405,80 +405,109 @@ def call_gemini_streaming(
         f"You are scanning the {section_label}."
     )
 
-    stream = client.models.generate_content_stream(
-        model="gemini-2.5-flash",
-        contents=[
-            SYSTEM_PROMPT + context,
-            types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
-        ],
-        config=types.GenerateContentConfig(
-            temperature=0.4,
-            max_output_tokens=8192,
-        ),
-    )
+    # Flash-Lite is the primary model — optimised for low latency, thinking disabled,
+    # designed for high-volume extraction tasks. Expected ~8-10s per section.
+    # Full Flash is the 503-only fallback — used only when Flash-Lite is unavailable.
+    model_sequence = ["gemini-2.5-flash-lite", "gemini-2.5-flash"]
 
-    buffer       = ""
-    all_products = []
+    # Hard stopclock per section: break out of the stream after this many seconds
+    # and return whatever products have been extracted so far. Prevents any single
+    # section call from blowing the ~20s per image target.
+    SECTION_TIMEOUT_SECS = 15
+    last_model_error = ""
 
-    for chunk in stream:
-        if not chunk.text:
-            continue
-        buffer += chunk.text
-
-        while "\n" in buffer:
-            line, buffer = buffer.split("\n", 1)
-            line = line.strip().rstrip(",")
-            if not line or not line.startswith("{"):
-                continue
-
-            try:
-                product = json.loads(line)
-            except json.JSONDecodeError:
-                try:
-                    from json_repair import repair_json
-                    product = json.loads(repair_json(line))
-                except Exception:
-                    continue
-
-            if isinstance(product, dict) and product:
-                all_products.append(product)
-                # Real-time product count — updates after every single product
-                if count_placeholder:
-                    count_placeholder.info(
-                        f"🔍 Scanning {section_label}... "
-                        f"**{len(all_products)} product(s) found so far**"
-                    )
-                # Rolling table preview — updates every 5 rows
-                if live_placeholder and len(all_products) % 5 == 0:
-                    _render_stream_preview(live_placeholder, all_products)
-
-    # Flush any remaining buffered content
-    remainder = buffer.strip().rstrip(",")
-    if remainder and remainder.startswith("{"):
+    for model_name in model_sequence:
         try:
-            product = json.loads(remainder)
-        except json.JSONDecodeError:
-            try:
-                from json_repair import repair_json
-                product = json.loads(repair_json(remainder))
-            except Exception:
-                product = None
-        if product and isinstance(product, dict):
-            all_products.append(product)
+            stream = client.models.generate_content_stream(
+                model=model_name,
+                contents=[
+                    SYSTEM_PROMPT + context,
+                    types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+                ],
+                config=types.GenerateContentConfig(
+                    temperature=0.4,
+                    max_output_tokens=8192,
+                ),
+            )
 
-    # Final preview with all products from this section
-    if live_placeholder and all_products:
-        _render_stream_preview(live_placeholder, all_products)
-    if count_placeholder and all_products:
-        count_placeholder.info(
-            f"✅ {section_label.capitalize()} complete — "
-            f"**{len(all_products)} product(s) found**"
-        )
+            buffer       = ""
+            all_products = []
+            section_start = time.time()
+            timed_out     = False
 
-    if not all_products:
-        raise ValueError(f"No product rows extracted from {section_label}.")
+            for chunk in stream:
+                # Stopclock — break out after SECTION_TIMEOUT_SECS and return
+                # whatever products have been extracted rather than blocking further.
+                if time.time() - section_start > SECTION_TIMEOUT_SECS:
+                    timed_out = True
+                    break
+                if not chunk.text:
+                    continue
+                buffer += chunk.text
 
-    return all_products
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)
+                    line = line.strip().rstrip(",")
+                    if not line or not line.startswith("{"):
+                        continue
+                    try:
+                        product = json.loads(line)
+                    except json.JSONDecodeError:
+                        try:
+                            from json_repair import repair_json
+                            product = json.loads(repair_json(line))
+                        except Exception:
+                            continue
+                    if isinstance(product, dict) and product:
+                        all_products.append(product)
+                        if count_placeholder:
+                            count_placeholder.info(
+                                f"🔍 Scanning {section_label} ({model_name})... "
+                                f"**{len(all_products)} product(s) found so far**"
+                            )
+                        if live_placeholder and len(all_products) % 5 == 0:
+                            _render_stream_preview(live_placeholder, all_products)
+
+            # Flush remaining buffer
+            remainder = buffer.strip().rstrip(",")
+            if remainder and remainder.startswith("{"):
+                try:
+                    product = json.loads(remainder)
+                except json.JSONDecodeError:
+                    try:
+                        from json_repair import repair_json
+                        product = json.loads(repair_json(remainder))
+                    except Exception:
+                        product = None
+                if product and isinstance(product, dict):
+                    all_products.append(product)
+
+            if live_placeholder and all_products:
+                _render_stream_preview(live_placeholder, all_products)
+            if count_placeholder and all_products:
+                timeout_note = " (stopclock — partial)" if timed_out else ""
+                count_placeholder.info(
+                    f"✅ {section_label.capitalize()} complete ({model_name}{timeout_note}) — "
+                    f"**{len(all_products)} product(s) found**"
+                )
+
+            if not all_products:
+                raise ValueError(f"No product rows extracted from {section_label}.")
+
+            return all_products  # Success — return immediately
+
+        except Exception as exc:
+            err_str   = str(exc)
+            err_lower = err_str.lower()
+            last_model_error = err_str
+            # Only fall back to the next model on 503 / capacity errors
+            if any(x in err_lower for x in ("503", "unavailable", "overloaded", "high demand")):
+                if model_name != model_sequence[-1]:
+                    time.sleep(5)   # brief pause before trying fallback model
+                    continue
+            raise   # Non-503 errors propagate immediately
+
+    raise ValueError(f"All models failed for {section_label}. Last error: {last_model_error}")
 
 
 def process_one_image(
@@ -512,17 +541,27 @@ def process_one_image(
 
             # Split tall images into sections — each section gets full model attention
             sections = split_image_vertical(image_bytes)
-            all_data = []
+            all_data      = []
+            section_warns = []   # non-fatal section failures logged here
 
             for section_bytes, section_label in sections:
-                section_products = call_gemini_streaming(
-                    client, section_bytes, retailer, city,
-                    section_label, live_placeholder, count_placeholder,
-                )
-                all_data.extend(section_products)
+                try:
+                    section_products = call_gemini_streaming(
+                        client, section_bytes, retailer, city,
+                        section_label, live_placeholder, count_placeholder,
+                    )
+                    all_data.extend(section_products)
+                except Exception as sec_exc:
+                    # A single section failing (e.g. 503) should not discard
+                    # results already extracted from other sections.
+                    section_warns.append(f"{section_label}: {sec_exc}")
 
             if not all_data:
-                raise ValueError("No products found across any image section.")
+                # Every section failed — surface the errors
+                raise ValueError(
+                    "No products found in any image section. Section errors: "
+                    + " | ".join(section_warns)
+                )
 
             # Deduplicate products that appear in the overlap between sections.
             # Key: brand + product name (case-insensitive). Keep first occurrence.
@@ -557,6 +596,11 @@ def process_one_image(
                 df["Pack_Size"] = df["Pack_Size"].apply(standardize_pack_size)
             df = standardize_prices(df)
             df.rename(columns=COL_RENAME, inplace=True)
+
+            # If any sections failed (e.g. 503), warn — but still return what we got
+            if section_warns:
+                warn_note = "⚠️ Partial results — some sections failed: " + " | ".join(section_warns)
+                return df, warn_note   # (df, warning) rather than (None, error)
 
             return df, None
 
@@ -644,6 +688,11 @@ if st.session_state["processing"]:
 
         if df_chunk is not None:
             st.session_state["results"].append(df_chunk)
+            if error:   # error here is actually a warning about partial results
+                st.session_state["failed_files"].append({
+                    "name":  file_info["name"],
+                    "error": error,
+                })
         else:
             st.session_state["failed_files"].append({
                 "name":  file_info["name"],
