@@ -363,7 +363,17 @@ def call_gemini(client, image_bytes: bytes, retailer: str, city: str) -> list[di
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as e:
-        raise ValueError(f"JSON parse error: {e}. Raw (first 300 chars): {raw[:300]}")
+        # First parse attempt failed — try auto-repair before giving up.
+        # Handles unescaped quotes, apostrophes in Spanish product names,
+        # stray characters in on-pack claims, and other common model output issues.
+        try:
+            from json_repair import repair_json
+            data = json.loads(repair_json(raw))
+        except Exception:
+            raise ValueError(
+                f"JSON parse error (repair also failed): {e}. "
+                f"Raw (first 300 chars): {raw[:300]}"
+            )
 
     # Handle model occasionally wrapping the array in an object
     if isinstance(data, dict):
