@@ -124,6 +124,7 @@ CRITICAL OUTPUT FORMAT:
 --- MANUFACTURER DICTIONARY ---
 Use this mapping to assign "Manufacturer". If a brand is not listed, use your internal knowledge.
 Postobon S.A.: Postobon, Hit, Cristal, Bretana, Colombiana, Popular, Freskola, Hipinto, Speed Max, Peak, Sr. Toronjo, Agua Oasis.
+  Note: In Colombia, Cristal is a POSTOBON still water brand — NOT The Coca-Cola Company.
   Note: Speed Max is sold in ALUMINIUM CANS, not plastic bottles.
 PepsiCo: Pepsi, 7Up, Mirinda, Mountain Dew, H2Oh!, Gatorade, Aquafina, Teem, Lipton Ice Tea (JV), Lays, Doritos.
 The Coca-Cola Company: Coca-Cola, Sprite, Fanta, Quatro, Brisa, Manantial, Valle, Del Valle, Powerade, Fuze Tea, Eva, Five Alive.
@@ -144,6 +145,7 @@ Aje Group: Big Cola, Cifrut, Sporade, Cielo, Pulp.
 --- CATEGORY NOTES ---
 Apply these corrections before assigning Category — they override general rules:
 - Cristal (Postobon) is a STILL WATER brand, not a carbonated soft drink.
+- Bretana (Postobon) is a CARBONATED SOFT DRINK (lemon-lime flavour), not a water.
 - Hit (Postobon) is a JUICE DRINK / NECTAR, not a carbonated soft drink.
 - Del Valle is a JUICE brand, not a carbonated soft drink.
 - Vive100% is a FUNCTIONAL / ENERGY DRINK, not a carbonated soft drink.
