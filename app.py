@@ -105,8 +105,10 @@ Work through EVERY section methodically. For each section identify ALL products 
 DO NOT stop until every visible product in every section has been captured.
 A complete scan of a standard convenience store fridge or shelf typically yields 20-50 product rows.
 
-CRITICAL JSON INSTRUCTIONS:
-- Return a strictly valid JSON array of product objects. No markdown, no wrapper object.
+CRITICAL OUTPUT FORMAT:
+- Output each product as a standalone JSON object on its own line (JSONL format).
+- Do NOT wrap products in a JSON array. Do NOT add markdown code fences.
+- Every line must be a complete, self-contained JSON object.
 - Do NOT use unescaped double quotes inside string values.
 
 --- MANUFACTURER DICTIONARY ---
@@ -126,7 +128,7 @@ TGI Group: Chivita, Hollandia.
 Aje Group: Big Cola, Cifrut, Sporade, Cielo, Pulp.
 --- END DICTIONARY ---
 
-Task: Extract all visible products. Return a JSON array where each element is a product object.
+Task: Extract all visible products. Output each product as a standalone JSON object on its own line.
 Each object must contain ALL of the following keys. Return an empty string for any unknown value.
 
 1.  "Product_Name":   Specific name on label.
@@ -329,68 +331,111 @@ def load_uploaded_files(uploaded_files) -> list[dict]:
     return queue
 
 
-def call_gemini(client, image_bytes: bytes, retailer: str, city: str) -> list[dict]:
+def _render_stream_preview(placeholder, raw_products: list[dict]) -> None:
     """
-    Send one shelf image to Gemini 2.0 Flash and return a list of product dicts.
-    response_mime_type enforces JSON output. temperature=0.1 ensures consistency.
+    Render a live preview table from raw (pre-normalisation) product dicts.
+    Called during streaming every 5 rows so users see products appearing in real time.
+    Errors here are swallowed — the preview must never interrupt main processing.
+    """
+    try:
+        df = pd.DataFrame(raw_products)
+        df = df.rename(columns={k: v for k, v in COL_RENAME.items() if k in df.columns})
+        preview_cols = [c for c in DESIRED_COLS if c in df.columns]
+        placeholder.dataframe(
+            df[preview_cols] if preview_cols else df,
+            use_container_width=True,
+        )
+    except Exception:
+        pass
+
+
+def call_gemini_streaming(
+    client,
+    image_bytes: bytes,
+    retailer: str,
+    city: str,
+    live_placeholder=None,
+) -> list[dict]:
+    """
+    Stream product rows from Gemini in JSONL format (one JSON object per line).
+    Updates live_placeholder every 5 rows so users see products appearing in real time.
+    Full normalisation happens later on the complete list — the preview is raw.
     Raises a descriptive exception on any failure.
     """
-    response = client.models.generate_content(
+    stream = client.models.generate_content_stream(
         model="gemini-2.5-flash",
         contents=[
             SYSTEM_PROMPT + f"\nContext: This store is in {city}, {retailer}.",
             types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
         ],
         config=types.GenerateContentConfig(
-            response_mime_type="application/json",
             temperature=0.1,
             max_output_tokens=8192,
         ),
     )
 
-    if not response.text:
-        raise ValueError("Gemini returned an empty response.")
+    buffer       = ""
+    all_products = []
 
-    raw = response.text.strip()
+    for chunk in stream:
+        if not chunk.text:
+            continue
+        buffer += chunk.text
 
-    # Strip accidental markdown fences
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
-    if raw.endswith("```"):
-        raw = raw[:-3]
-    raw = raw.strip()
+        # Parse every complete line that has arrived so far
+        while "\n" in buffer:
+            line, buffer = buffer.split("\n", 1)
+            line = line.strip().rstrip(",")
 
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        # First parse attempt failed — try auto-repair before giving up.
-        # Handles unescaped quotes, apostrophes in Spanish product names,
-        # stray characters in on-pack claims, and other common model output issues.
+            # Skip array brackets, markdown fences, empty lines, non-object lines
+            if not line or not line.startswith("{"):
+                continue
+
+            try:
+                product = json.loads(line)
+            except json.JSONDecodeError:
+                try:
+                    from json_repair import repair_json
+                    product = json.loads(repair_json(line))
+                except Exception:
+                    continue  # Silently skip unparseable lines
+
+            if isinstance(product, dict) and product:
+                all_products.append(product)
+                # Update the live table every 5 rows
+                if live_placeholder and len(all_products) % 5 == 0:
+                    _render_stream_preview(live_placeholder, all_products)
+
+    # Process any content left in the buffer after streaming ends
+    remainder = buffer.strip().rstrip(",")
+    if remainder and remainder.startswith("{"):
         try:
-            from json_repair import repair_json
-            data = json.loads(repair_json(raw))
-        except Exception:
-            raise ValueError(
-                f"JSON parse error (repair also failed): {e}. "
-                f"Raw (first 300 chars): {raw[:300]}"
-            )
+            product = json.loads(remainder)
+        except json.JSONDecodeError:
+            try:
+                from json_repair import repair_json
+                product = json.loads(repair_json(remainder))
+            except Exception:
+                product = None
+        if product and isinstance(product, dict):
+            all_products.append(product)
 
-    # Handle model occasionally wrapping the array in an object
-    if isinstance(data, dict):
-        for v in data.values():
-            if isinstance(v, list) and len(v) > 0:
-                data = v
-                break
+    # Final preview showing all products found
+    if live_placeholder and all_products:
+        _render_stream_preview(live_placeholder, all_products)
 
-    if not isinstance(data, list) or len(data) == 0:
-        raise ValueError("No product rows found in API response.")
+    if not all_products:
+        raise ValueError("No product rows extracted from streaming response.")
 
-    return data
+    return all_products
 
 
-def process_one_image(client, file_info: dict) -> tuple[pd.DataFrame | None, str | None]:
+def process_one_image(
+    client, file_info: dict, live_placeholder=None
+) -> tuple[pd.DataFrame | None, str | None]:
     """
-    Full pipeline for one image: API call, parse, normalise, rename.
+    Full pipeline for one image: streaming API call, parse, normalise, rename.
+    live_placeholder is an st.empty() that gets updated every 5 rows during streaming.
     Returns (DataFrame, None) on success or (None, error_string) on failure.
     Retries up to 3 times with backoff tuned to the error type.
     """
@@ -404,7 +449,13 @@ def process_one_image(client, file_info: dict) -> tuple[pd.DataFrame | None, str
     last_error = "Unknown error"
     for attempt in range(3):
         try:
-            data = call_gemini(client, image_bytes, retailer, city)
+            # Clear the preview on retry so stale rows from the previous attempt vanish
+            if attempt > 0 and live_placeholder:
+                live_placeholder.empty()
+
+            data = call_gemini_streaming(
+                client, image_bytes, retailer, city, live_placeholder
+            )
 
             df = pd.DataFrame(data)
             if df.empty:
@@ -497,7 +548,15 @@ if st.session_state["processing"]:
         )
 
         client = genai.Client(api_key=api_key)
-        df_chunk, error = process_one_image(client, file_info)
+
+        # Placeholder for the live streaming preview — rows appear here as Gemini finds them
+        st.caption(f"Products found in this image will appear below as they are extracted:")
+        stream_placeholder = st.empty()
+
+        df_chunk, error = process_one_image(client, file_info, stream_placeholder)
+
+        # Clear the stream preview — final results shown in the cumulative table below
+        stream_placeholder.empty()
 
         # Free image bytes immediately — keeps memory flat across large batches
         st.session_state["image_queue"][idx]["bytes"] = None
