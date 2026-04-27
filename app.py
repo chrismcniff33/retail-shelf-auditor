@@ -196,8 +196,7 @@ def parse_filename(filename: str) -> tuple[str, str]:
 def compress_image(raw_bytes: bytes) -> bytes | None:
     """
     Resize to max 1024x1024, JPEG quality 85.
-    1024px gives Gemini 2.0 Flash enough detail to read labels on densely
-    stocked shelves including products visible through glass refrigerator doors.
+    1024px gives Gemini enough detail to read labels on densely stocked shelves.
     """
     try:
         with Image.open(io.BytesIO(raw_bytes)) as img:
@@ -209,6 +208,40 @@ def compress_image(raw_bytes: bytes) -> bytes | None:
             return buf.getvalue()
     except Exception:
         return None
+
+
+def split_image_vertical(image_bytes: bytes) -> list[tuple[bytes, str]]:
+    """
+    Split a tall shelf image into top and bottom halves so each half gets
+    full model attention. A 10% overlap between halves ensures products
+    at the boundary are not missed.
+
+    Only splits portrait/tall images (height > width). Wide/landscape images
+    are returned as-is — they are typically single-shelf rows that don't need
+    splitting.
+
+    Returns a list of (section_bytes, section_label) tuples.
+    """
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            w, h = img.size
+            if h <= w:
+                # Wide image — no benefit from vertical split
+                return [(image_bytes, "full shelf")]
+
+            overlap = int(h * 0.10)
+            top    = img.crop((0, 0,                    w, h // 2 + overlap))
+            bottom = img.crop((0, h // 2 - overlap,     w, h))
+
+            sections = []
+            for section_img, label in [(top, "top half of the shelf"), (bottom, "bottom half of the shelf")]:
+                section_img.thumbnail((1024, 1024))
+                buf = io.BytesIO()
+                section_img.save(buf, format="JPEG", quality=85)
+                sections.append((buf.getvalue(), label))
+            return sections
+    except Exception:
+        return [(image_bytes, "full shelf")]
 
 
 def standardize_pack_size(val) -> str:
@@ -334,7 +367,6 @@ def load_uploaded_files(uploaded_files) -> list[dict]:
 def _render_stream_preview(placeholder, raw_products: list[dict]) -> None:
     """
     Render a live preview table from raw (pre-normalisation) product dicts.
-    Called during streaming every 5 rows so users see products appearing in real time.
     Errors here are swallowed — the preview must never interrupt main processing.
     """
     try:
@@ -354,22 +386,33 @@ def call_gemini_streaming(
     image_bytes: bytes,
     retailer: str,
     city: str,
+    section_label: str = "full shelf",
     live_placeholder=None,
+    count_placeholder=None,
 ) -> list[dict]:
     """
     Stream product rows from Gemini in JSONL format (one JSON object per line).
-    Updates live_placeholder every 5 rows so users see products appearing in real time.
-    Full normalisation happens later on the complete list — the preview is raw.
-    Raises a descriptive exception on any failure.
+
+    section_label  — tells the model which part of the image it's seeing
+                     (e.g. "top half of the shelf", "bottom half of the shelf").
+    count_placeholder — st.empty() updated after EVERY product (real-time ticker).
+    live_placeholder  — st.empty() updated every 5 products (rolling table preview).
+
+    Returns raw list of product dicts. Full normalisation happens downstream.
     """
+    context = (
+        f"\nContext: This store is in {city}, {retailer}. "
+        f"You are scanning the {section_label}."
+    )
+
     stream = client.models.generate_content_stream(
         model="gemini-2.5-flash",
         contents=[
-            SYSTEM_PROMPT + f"\nContext: This store is in {city}, {retailer}.",
+            SYSTEM_PROMPT + context,
             types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
         ],
         config=types.GenerateContentConfig(
-            temperature=0.1,
+            temperature=0.4,
             max_output_tokens=8192,
         ),
     )
@@ -382,12 +425,9 @@ def call_gemini_streaming(
             continue
         buffer += chunk.text
 
-        # Parse every complete line that has arrived so far
         while "\n" in buffer:
             line, buffer = buffer.split("\n", 1)
             line = line.strip().rstrip(",")
-
-            # Skip array brackets, markdown fences, empty lines, non-object lines
             if not line or not line.startswith("{"):
                 continue
 
@@ -398,15 +438,21 @@ def call_gemini_streaming(
                     from json_repair import repair_json
                     product = json.loads(repair_json(line))
                 except Exception:
-                    continue  # Silently skip unparseable lines
+                    continue
 
             if isinstance(product, dict) and product:
                 all_products.append(product)
-                # Update the live table every 5 rows
+                # Real-time product count — updates after every single product
+                if count_placeholder:
+                    count_placeholder.info(
+                        f"🔍 Scanning {section_label}... "
+                        f"**{len(all_products)} product(s) found so far**"
+                    )
+                # Rolling table preview — updates every 5 rows
                 if live_placeholder and len(all_products) % 5 == 0:
                     _render_stream_preview(live_placeholder, all_products)
 
-    # Process any content left in the buffer after streaming ends
+    # Flush any remaining buffered content
     remainder = buffer.strip().rstrip(",")
     if remainder and remainder.startswith("{"):
         try:
@@ -420,24 +466,34 @@ def call_gemini_streaming(
         if product and isinstance(product, dict):
             all_products.append(product)
 
-    # Final preview showing all products found
+    # Final preview with all products from this section
     if live_placeholder and all_products:
         _render_stream_preview(live_placeholder, all_products)
+    if count_placeholder and all_products:
+        count_placeholder.info(
+            f"✅ {section_label.capitalize()} complete — "
+            f"**{len(all_products)} product(s) found**"
+        )
 
     if not all_products:
-        raise ValueError("No product rows extracted from streaming response.")
+        raise ValueError(f"No product rows extracted from {section_label}.")
 
     return all_products
 
 
 def process_one_image(
-    client, file_info: dict, live_placeholder=None
+    client, file_info: dict, live_placeholder=None, count_placeholder=None
 ) -> tuple[pd.DataFrame | None, str | None]:
     """
-    Full pipeline for one image: streaming API call, parse, normalise, rename.
-    live_placeholder is an st.empty() that gets updated every 5 rows during streaming.
+    Full pipeline for one image: split into sections, stream each section,
+    deduplicate, normalise, and rename.
+
+    Splitting the image into top and bottom halves gives each half full model
+    attention, recovering products on lower shelves that the model ignores
+    when shown the full tall image at once.
+
     Returns (DataFrame, None) on success or (None, error_string) on failure.
-    Retries up to 3 times with backoff tuned to the error type.
+    Retries up to 3 times with backoff on API errors.
     """
     name = file_info["name"]
     retailer, city = parse_filename(name)
@@ -449,15 +505,39 @@ def process_one_image(
     last_error = "Unknown error"
     for attempt in range(3):
         try:
-            # Clear the preview on retry so stale rows from the previous attempt vanish
             if attempt > 0 and live_placeholder:
                 live_placeholder.empty()
+            if attempt > 0 and count_placeholder:
+                count_placeholder.empty()
 
-            data = call_gemini_streaming(
-                client, image_bytes, retailer, city, live_placeholder
-            )
+            # Split tall images into sections — each section gets full model attention
+            sections = split_image_vertical(image_bytes)
+            all_data = []
 
-            df = pd.DataFrame(data)
+            for section_bytes, section_label in sections:
+                section_products = call_gemini_streaming(
+                    client, section_bytes, retailer, city,
+                    section_label, live_placeholder, count_placeholder,
+                )
+                all_data.extend(section_products)
+
+            if not all_data:
+                raise ValueError("No products found across any image section.")
+
+            # Deduplicate products that appear in the overlap between sections.
+            # Key: brand + product name (case-insensitive). Keep first occurrence.
+            seen: set[str] = set()
+            unique_data: list[dict] = []
+            for product in all_data:
+                key = (
+                    str(product.get("Brand", "")).lower().strip() + "|" +
+                    str(product.get("Product_Name", "")).lower().strip()
+                )
+                if key not in seen:
+                    seen.add(key)
+                    unique_data.append(product)
+
+            df = pd.DataFrame(unique_data)
             if df.empty:
                 raise ValueError("DataFrame built from API response is empty.")
 
@@ -465,10 +545,9 @@ def process_one_image(
                 ["N/A", "n/a", "Unknown", "unknown", "None", "none", "null", "NULL"],
                 "",
             )
-
             df["Image name"] = name
             df["Retailer"]   = retailer
-            df["City"]        = city
+            df["City"]       = city
 
             for col in AI_EXPECTED_COLS:
                 if col not in df.columns:
@@ -486,9 +565,9 @@ def process_one_image(
             if attempt < 2:
                 err_lower = last_error.lower()
                 if "429" in err_lower or "quota" in err_lower or "resource_exhausted" in err_lower:
-                    time.sleep(30 * (3 ** attempt))   # 30s then 90s
+                    time.sleep(30 * (3 ** attempt))
                 elif any(x in err_lower for x in ("503", "504", "500", "unavailable")):
-                    time.sleep(15 * (attempt + 1))    # 15s then 30s
+                    time.sleep(15 * (attempt + 1))
                 elif "timeout" in err_lower:
                     time.sleep(10 * (attempt + 1))
                 elif "json" in err_lower or "empty" in err_lower:
@@ -549,14 +628,16 @@ if st.session_state["processing"]:
 
         client = genai.Client(api_key=api_key)
 
-        # Placeholder for the live streaming preview — rows appear here as Gemini finds them
-        st.caption(f"Products found in this image will appear below as they are extracted:")
-        stream_placeholder = st.empty()
+        # count_box: real-time ticker updating after every product found
+        # stream_table: rolling table preview updating every 5 rows
+        count_box    = st.empty()
+        stream_table = st.empty()
 
-        df_chunk, error = process_one_image(client, file_info, stream_placeholder)
+        df_chunk, error = process_one_image(client, file_info, stream_table, count_box)
 
-        # Clear the stream preview — final results shown in the cumulative table below
-        stream_placeholder.empty()
+        # Clear the streaming UI — cumulative results table takes over below
+        count_box.empty()
+        stream_table.empty()
 
         # Free image bytes immediately — keeps memory flat across large batches
         st.session_state["image_queue"][idx]["bytes"] = None
