@@ -91,6 +91,43 @@ AI_EXPECTED_COLS = list(COL_RENAME.keys()) + [
     "Quantity", "Promo", "Facings",
 ]
 
+# ── RESPONSE SCHEMA ────────────────────────────────────────────────────────────
+# Enforces the exact JSON structure Gemini must return on every call.
+# This eliminates JSON parse errors, field omissions, markdown fences,
+# and dict-wrapping — the primary sources of app glitchiness.
+# All 17 fields are required so every product row is always complete.
+RESPONSE_SCHEMA = types.Schema(
+    type=types.Type.ARRAY,
+    items=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "Product_Name":   types.Schema(type=types.Type.STRING),
+            "Brand":          types.Schema(type=types.Type.STRING),
+            "Manufacturer":   types.Schema(type=types.Type.STRING),
+            "Category":       types.Schema(type=types.Type.STRING),
+            "Country":        types.Schema(type=types.Type.STRING),
+            "Pack_Size":      types.Schema(type=types.Type.STRING),
+            "Quantity":       types.Schema(type=types.Type.STRING),
+            "Price":          types.Schema(type=types.Type.STRING),
+            "Promo":          types.Schema(type=types.Type.STRING),
+            "Pack_Type":      types.Schema(type=types.Type.STRING),
+            "Pack_Material":  types.Schema(type=types.Type.STRING),
+            "Pack_Colour":    types.Schema(type=types.Type.STRING),
+            "Flavour":        types.Schema(type=types.Type.STRING),
+            "On_pack_claims": types.Schema(type=types.Type.STRING),
+            "Position":       types.Schema(type=types.Type.STRING),
+            "Facings":        types.Schema(type=types.Type.STRING),
+            "Confidence":     types.Schema(type=types.Type.STRING),
+        },
+        required=[
+            "Product_Name", "Brand", "Manufacturer", "Category", "Country",
+            "Pack_Size", "Quantity", "Price", "Promo", "Pack_Type",
+            "Pack_Material", "Pack_Colour", "Flavour", "On_pack_claims",
+            "Position", "Facings", "Confidence",
+        ],
+    )
+)
+
 
 # ── 5. SYSTEM PROMPT ───────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """
@@ -98,11 +135,6 @@ You are a global retail data expert strictly adhering to Euromonitor category de
 Context: The image filename suggests the retailer and city.
 
 CRITICAL INSTRUCTION: Scan systematically (top-to-bottom, left-to-right) to ensure absolutely ZERO products are missed.
-
-CRITICAL JSON INSTRUCTIONS:
-- You MUST output a strictly valid JSON array of objects.
-- Do NOT use unescaped double quotes inside your string values.
-- Do NOT wrap the response in markdown blocks (like ```json). Just return the raw array.
 
 --- MANUFACTURER DICTIONARY ---
 Use this mapping to assign "Manufacturer". If a brand is not listed, use your internal knowledge.
@@ -341,17 +373,24 @@ def load_uploaded_files(uploaded_files) -> list[dict]:
 def call_gemini(client, image_bytes: bytes, retailer: str, city: str) -> list[dict]:
     """
     Send one image to Gemini and return a list of product dicts.
+
+    response_schema guarantees:
+      - Output is always a JSON array (no dict-wrapping)
+      - All 17 fields are always present on every product row
+      - No markdown fences, no malformed JSON, no missing keys
+    temperature=0.1 makes extraction highly deterministic and consistent.
     Raises a descriptive exception on any failure so the caller can log it.
     """
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-2.0-flash",
         contents=[
             SYSTEM_PROMPT + f"\nContext: This store is in {city}, {retailer}.",
             types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
         ],
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
-            temperature=0.4,
+            response_schema=RESPONSE_SCHEMA,
+            temperature=0.1,
             max_output_tokens=8192,
             thinking_config=types.ThinkingConfig(thinking_budget=0),
         ),
@@ -360,31 +399,17 @@ def call_gemini(client, image_bytes: bytes, retailer: str, city: str) -> list[di
     if not response.text:
         raise ValueError("Gemini returned an empty response.")
 
-    raw = response.text.strip()
-
-    # Strip accidental markdown fences
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
-    if raw.endswith("```"):
-        raw = raw[:-3]
-    raw = raw.strip()
-
+    # Schema guarantees valid JSON — no fence stripping or dict-unwrapping needed
     try:
-        data = json.loads(raw)
+        data = json.loads(response.text)
     except json.JSONDecodeError as e:
-        raise ValueError(f"JSON parse error — {e}. Raw response (first 300 chars): {raw[:300]}")
+        raise ValueError(
+            f"JSON parse error (unexpected with schema enforced) — {e}. "
+            f"Raw response (first 300 chars): {response.text[:300]}"
+        )
 
-    # Handle model occasionally wrapping the array in an object
-    if isinstance(data, dict):
-        for v in data.values():
-            if isinstance(v, list):
-                data = v
-                break
-
-    if not isinstance(data, list):
-        raise ValueError(f"Expected a JSON array, got {type(data).__name__}.")
-    if len(data) == 0:
-        raise ValueError("API returned a valid JSON array but it contained zero product rows.")
+    if not isinstance(data, list) or len(data) == 0:
+        raise ValueError("API returned no product rows.")
 
     return data
 
