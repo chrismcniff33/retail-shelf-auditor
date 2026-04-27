@@ -413,7 +413,7 @@ def call_gemini_streaming(
     # Hard stopclock per section: break out of the stream after this many seconds
     # and return whatever products have been extracted so far. Prevents any single
     # section call from blowing the ~20s per image target.
-    SECTION_TIMEOUT_SECS = 15
+    SECTION_TIMEOUT_SECS = 20
     last_model_error = ""
 
     for model_name in model_sequence:
@@ -426,7 +426,7 @@ def call_gemini_streaming(
                 ],
                 config=types.GenerateContentConfig(
                     temperature=0.4,
-                    max_output_tokens=8192,
+                    max_output_tokens=16000,
                 ),
             )
 
@@ -575,6 +575,14 @@ def process_one_image(
                 if key not in seen:
                     seen.add(key)
                     unique_data.append(product)
+
+            # Remove any rows where both Brand and Product_Name are empty —
+            # these are malformed model outputs (e.g. parsing artefacts) that
+            # slipped through deduplication because their key was unique.
+            unique_data = [
+                p for p in unique_data
+                if str(p.get("Brand", "")).strip() or str(p.get("Product_Name", "")).strip()
+            ]
 
             df = pd.DataFrame(unique_data)
             if df.empty:
