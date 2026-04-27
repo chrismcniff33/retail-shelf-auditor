@@ -116,10 +116,11 @@ Use the Facings field to record how many of that SKU are visible across the enti
 A shelf with 5 Coca-Cola bottles and 3 Sprite bottles = 2 rows, not 8.
 
 CRITICAL OUTPUT FORMAT:
-- Output each product as a standalone JSON object on its own line (JSONL format).
-- Do NOT wrap products in a JSON array. Do NOT add markdown code fences.
-- Every line must be a complete, self-contained JSON object.
-- Do NOT use unescaped double quotes inside string values.
+- Output ALL products as a SINGLE JSON ARRAY — starting with [ and ending with ].
+- Each product is a JSON object inside the array, separated by commas.
+- Do NOT output individual JSON objects on separate lines (no JSONL).
+- Do NOT add markdown code fences (no ```json).
+- Use only double quotes. Do NOT use unescaped double quotes inside string values.
 
 --- MANUFACTURER DICTIONARY ---
 Use this mapping to assign "Manufacturer". If a brand is not listed, use your internal knowledge.
@@ -396,63 +397,40 @@ def load_uploaded_files(uploaded_files) -> list[dict]:
     return queue
 
 
-def _render_stream_preview(placeholder, raw_products: list[dict]) -> None:
-    """
-    Render a live preview table from raw (pre-normalisation) product dicts.
-    Errors here are swallowed — the preview must never interrupt main processing.
-    """
-    try:
-        df = pd.DataFrame(raw_products)
-        df = df.rename(columns={k: v for k, v in COL_RENAME.items() if k in df.columns})
-        preview_cols = [c for c in DESIRED_COLS if c in df.columns]
-        placeholder.dataframe(
-            df[preview_cols] if preview_cols else df,
-            use_container_width=True,
-        )
-    except Exception:
-        pass
-
-
-def call_gemini_streaming(
+def call_gemini_json(
     client,
     image_bytes: bytes,
     retailer: str,
     city: str,
     section_label: str = "full shelf",
-    live_placeholder=None,
-    count_placeholder=None,
+    status_placeholder=None,
 ) -> list[dict]:
     """
-    Stream product rows from Gemini in JSONL format (one JSON object per line).
+    Non-streaming Gemini call that returns a complete JSON array.
 
-    section_label  — tells the model which part of the image it's seeing
-                     (e.g. "top half of the shelf", "bottom half of the shelf").
-    count_placeholder — st.empty() updated after EVERY product (real-time ticker).
-    live_placeholder  — st.empty() updated every 5 products (rolling table preview).
+    Switching from JSONL streaming to a single JSON array eliminates the main
+    source of run-to-run variance: malformed lines in a streamed response
+    silently dropped individual products, giving 13 products one run and 20
+    the next from the same image. Here the full response is received before
+    any parsing begins, and json_repair works on the whole block.
 
-    Returns raw list of product dicts. Full normalisation happens downstream.
+    Returns a list of product dicts. Raises on total failure.
     """
     context = (
         f"\nContext: This store is in {city}, {retailer}. "
         f"You are scanning the {section_label}."
     )
-
-    # Flash-Lite is the primary model — optimised for low latency, thinking disabled,
-    # designed for high-volume extraction tasks. Expected ~8-10s per section.
-    # Full Flash is the 503-only fallback — used only when Flash-Lite is unavailable.
-    # Flash is primary — more thorough and consistent than Flash-Lite for dense scenes.
-    # Flash-Lite is the 503-only fallback.
-    model_sequence    = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
-
-    # 35-second stopclock per section. Flash typically completes in 25-30s on a
-    # well-stocked shelf, so this captures the vast majority of products while
-    # preventing runaway calls. Worst case: 2 sections × 35s = 70s per image.
-    SECTION_TIMEOUT_SECS = 35
-    last_model_error  = ""
+    model_sequence   = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
+    last_model_error = ""
 
     for model_name in model_sequence:
         try:
-            stream = client.models.generate_content_stream(
+            if status_placeholder:
+                status_placeholder.info(
+                    f"🔍 Scanning {section_label} with {model_name}…"
+                )
+
+            response = client.models.generate_content(
                 model=model_name,
                 contents=[
                     SYSTEM_PROMPT + context,
@@ -464,83 +442,57 @@ def call_gemini_streaming(
                 ),
             )
 
-            buffer       = ""
-            all_products = []
-            section_start = time.time()
+            raw = response.text.strip()
 
-            for chunk in stream:
-                if time.time() - section_start > SECTION_TIMEOUT_SECS:
-                    break
-                if not chunk.text:
-                    continue
-                buffer += chunk.text
+            # Strip markdown fences if the model added them
+            raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("` \n")
 
-                while "\n" in buffer:
-                    line, buffer = buffer.split("\n", 1)
-                    line = line.strip().rstrip(",")
-                    if not line or not line.startswith("{"):
-                        continue
-                    try:
-                        product = json.loads(line)
-                    except json.JSONDecodeError:
-                        try:
-                            from json_repair import repair_json
-                            product = json.loads(repair_json(line))
-                        except Exception:
-                            continue
-                    if isinstance(product, dict) and product:
-                        all_products.append(product)
-                        if count_placeholder:
-                            count_placeholder.info(
-                                f"🔍 Scanning {section_label} ({model_name})... "
-                                f"**{len(all_products)} product(s) found so far**"
-                            )
-                        if live_placeholder and len(all_products) % 5 == 0:
-                            _render_stream_preview(live_placeholder, all_products)
-
-            # Flush remaining buffer
-            remainder = buffer.strip().rstrip(",")
-            if remainder and remainder.startswith("{"):
+            # Parse — try direct JSON first, then json_repair on the whole block
+            products = None
+            try:
+                products = json.loads(raw)
+            except json.JSONDecodeError:
                 try:
-                    product = json.loads(remainder)
-                except json.JSONDecodeError:
-                    try:
-                        from json_repair import repair_json
-                        product = json.loads(repair_json(remainder))
-                    except Exception:
-                        product = None
-                if product and isinstance(product, dict):
-                    all_products.append(product)
+                    from json_repair import repair_json
+                    products = json.loads(repair_json(raw))
+                except Exception:
+                    pass
 
-            if live_placeholder and all_products:
-                _render_stream_preview(live_placeholder, all_products)
-            if count_placeholder and all_products:
-                count_placeholder.info(
-                    f"✅ {section_label.capitalize()} complete ({model_name}) — "
-                    f"**{len(all_products)} product(s) found**"
+            # Accept array or single object
+            if isinstance(products, dict):
+                products = [products]
+            if not isinstance(products, list):
+                raise ValueError(f"Response was not a JSON array: {raw[:200]}")
+
+            products = [p for p in products if isinstance(p, dict) and p]
+
+            if status_placeholder:
+                status_placeholder.info(
+                    f"✅ {section_label.capitalize()} — "
+                    f"**{len(products)} product(s) found**"
                 )
 
-            if not all_products:
-                raise ValueError(f"No product rows extracted from {section_label}.")
+            if not products:
+                raise ValueError(f"Empty product list from {section_label}.")
 
-            return all_products
+            return products
 
         except Exception as exc:
             err_str   = str(exc)
             err_lower = err_str.lower()
             last_model_error = err_str
-            # Only fall back to the next model on 503 / capacity errors
             if any(x in err_lower for x in ("503", "unavailable", "overloaded", "high demand")):
                 if model_name != model_sequence[-1]:
-                    time.sleep(5)   # brief pause before trying fallback model
+                    time.sleep(5)
                     continue
-            raise   # Non-503 errors propagate immediately
+            raise
 
     raise ValueError(f"All models failed for {section_label}. Last error: {last_model_error}")
 
 
+
 def process_one_image(
-    client, file_info: dict, live_placeholder=None, count_placeholder=None
+    client, file_info: dict, status_placeholder=None
 ) -> tuple[pd.DataFrame | None, str | None]:
     """
     Full pipeline for one image: split into sections, stream each section,
@@ -563,10 +515,8 @@ def process_one_image(
     last_error = "Unknown error"
     for attempt in range(3):
         try:
-            if attempt > 0 and live_placeholder:
-                live_placeholder.empty()
-            if attempt > 0 and count_placeholder:
-                count_placeholder.empty()
+            if attempt > 0 and status_placeholder:
+                status_placeholder.empty()
 
             # Split tall images into sections — each section gets full model attention
             sections      = split_image_vertical(image_bytes)
@@ -575,9 +525,9 @@ def process_one_image(
 
             for section_bytes, section_label in sections:
                 try:
-                    section_products = call_gemini_streaming(
+                    section_products = call_gemini_json(
                         client, section_bytes, retailer, city,
-                        section_label, live_placeholder, count_placeholder,
+                        section_label, status_placeholder,
                     )
                     all_data.extend(section_products)
                 except Exception as sec_exc:
@@ -734,14 +684,14 @@ if st.session_state["processing"]:
 
         client = genai.Client(api_key=api_key)
 
-        # stream_table shows the rolling product table as the model scans each section.
-        # count_box is passed as None — the per-product ticker is hidden from the user.
-        stream_table = st.empty()
+        # Single status placeholder — shows which section is being scanned,
+        # then updates to show the section product count when complete.
+        status_placeholder = st.empty()
 
-        df_chunk, error = process_one_image(client, file_info, stream_table, None)
+        df_chunk, error = process_one_image(client, file_info, status_placeholder)
 
-        # Clear the in-progress stream — cumulative table takes over below
-        stream_table.empty()
+        # Clear section status — cumulative results table takes over below
+        status_placeholder.empty()
 
         # Free image bytes immediately — keeps memory flat across large batches
         st.session_state["image_queue"][idx]["bytes"] = None
