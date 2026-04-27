@@ -1,5 +1,6 @@
 streamlit
-google-genai
+google-genai>=1.7.0
 pandas
 Pillow
 openpyxl
+json-repair
