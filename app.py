@@ -392,7 +392,6 @@ def call_gemini(client, image_bytes: bytes, retailer: str, city: str) -> list[di
             response_schema=RESPONSE_SCHEMA,
             temperature=0.1,
             max_output_tokens=8192,
-            thinking_config=types.ThinkingConfig(thinking_budget=0),
         ),
     )
 
@@ -464,16 +463,19 @@ def process_one_image(client, file_info: dict) -> tuple[pd.DataFrame | None, str
 
         except Exception as exc:
             last_error = str(exc)
-            if attempt < 2:                         # still have retries left
+            if attempt < 2:                              # still have retries left
                 err_lower = last_error.lower()
-                if "429" in err_lower or "quota" in err_lower:
-                    time.sleep(20)                  # rate limit — wait longer
+                if "429" in err_lower or "quota" in err_lower or "resource_exhausted" in err_lower:
+                    # Exponential backoff: 30s then 90s.
+                    # Flat 20s was insufficient for sustained quota pressure.
+                    wait = 30 * (3 ** attempt)           # 30s, then 90s
+                    time.sleep(wait)
                 elif any(x in err_lower for x in ("timeout", "503", "504")):
-                    time.sleep(10 * (attempt + 1))  # transient server error
+                    time.sleep(15 * (attempt + 1))       # 15s, then 30s
                 elif "json" in err_lower or "empty" in err_lower:
-                    time.sleep(3)                   # parse issue — quick retry
+                    time.sleep(3)                        # parse issue — quick retry
                 else:
-                    time.sleep(5)                   # generic back-off
+                    time.sleep(5)                        # generic back-off
 
     return None, last_error
 
@@ -577,6 +579,11 @@ if st.session_state["processing"]:
                 mime="text/csv",
                 key=f"dl_interim_{idx}",   # unique key per render to avoid Streamlit warnings
             )
+
+        # ── Small inter-image pause — prevents RPM quota bursting.
+        # The state machine rerun adds ~2s naturally but an explicit pause
+        # ensures we never exceed ~15 req/min even on fast connections.
+        time.sleep(2)
 
         # ── Trigger next image
         st.rerun()
