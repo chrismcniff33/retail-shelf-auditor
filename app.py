@@ -289,7 +289,7 @@ if uploaded_files:
                 st.session_state['live_data_chunks'] = []
                 
                 genai.configure(api_key=api_key)
-                model = genai.GenerativeModel('gemini-2.0-flash')
+                model = genai.GenerativeModel('gemini-2.5-flash')
                 
                 st.write("### ⏱️ Live Processing Progress")
                 progress_bar = st.progress(0)
@@ -416,8 +416,11 @@ if uploaded_files:
                                             continue
                                             
                         except Exception as e:
+                            error_msg = str(e).lower()
+                            # Surface API-level errors immediately so they're visible to the user
+                            if any(x in error_msg for x in ["404", "not found", "deprecated", "model"]):
+                                st.error(f"🚨 API Model Error on **{file_name}**: {str(e)}\n\nThe model may be deprecated — check the model name in the code.")
                             if attempt < max_retries - 1:
-                                error_msg = str(e).lower()
                                 if "429" in error_msg or "quota" in error_msg:
                                     time.sleep(15) 
                                 elif "timeout" in error_msg or "503" in error_msg or "504" in error_msg:
