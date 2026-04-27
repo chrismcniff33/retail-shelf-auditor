@@ -103,7 +103,12 @@ Work through EVERY section methodically. For each section identify ALL products 
 - At the back of the shelf behind front-row products
 - Only partially in frame at the edges
 DO NOT stop until every visible product in every section has been captured.
-A complete scan of a standard convenience store fridge or shelf typically yields 20-50 product rows.
+A complete scan of a standard convenience store fridge or shelf typically yields 15-25 unique product rows.
+
+CRITICAL: Each unique product (SKU) must appear EXACTLY ONCE in your output.
+Do NOT create a separate row for each individual can or bottle.
+Use the Facings field to record how many of that SKU are visible across the entire section.
+A shelf with 5 Coca-Cola bottles and 3 Sprite bottles = 2 rows, not 8.
 
 CRITICAL OUTPUT FORMAT:
 - Output each product as a standalone JSON object on its own line (JSONL format).
@@ -151,31 +156,36 @@ Each object must contain ALL of the following keys. Return an empty string for a
 13. "Flavour":        MAX 3 WORDS — flavour or scent variant. Empty string if none.
 14. "On_pack_claims": Visible health, sustainability or taste claims. Empty string if none.
 15. "Position":       Shelf level — Top, Middle, or Bottom.
-16. "Facings":        Integer — identical items visible side-by-side.
+16. "Facings":        Integer — total count of this SKU visible across the entire section (not just side-by-side at one spot).
 17. "Confidence":     High if text clearly readable. Low if blurry or estimated.
 """
 
 
 # ── 6. SIDEBAR ─────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.header("Settings")
+    st.header("⚙️ Settings")
     if "GOOGLE_API_KEY" in st.secrets:
         api_key = st.secrets["GOOGLE_API_KEY"]
-        st.success("API key loaded")
+        st.success("✅ API key loaded")
     else:
         api_key = st.text_input("Google Gemini API Key", type="password")
         if not api_key:
-            st.warning("API key required to start.")
+            st.warning("⚠️ API key required to start.")
 
     st.divider()
-    st.subheader("Cost and Usage")
-    st.info("Approx. $0.60-1.00 per 1,000 images (Gemini 2.0 Flash).")
+    st.subheader("🤖 Model")
+    st.info("Gemini 2.5 Flash\n\nFallback: Gemini 2.5 Flash-Lite")
+
+    st.divider()
+    st.subheader("💰 Cost & Usage")
+    st.info("Approx. $0.60–1.00 per 1,000 images.")
+
     st.divider()
     st.markdown("""
-    ### Instructions
-    1. **Rename files**: Retailer-City-ShelfID.jpg
-    2. Upload images or a zip folder
-    3. Click Start Audit
+    ### 📝 Instructions
+    1. **Rename files**: `Retailer-City-ShelfID.jpg`
+    2. Upload images or a `.zip` folder
+    3. Click **Start Audit**
     4. Results update after each image
     5. Download available at any time
     """)
@@ -381,71 +391,6 @@ def _render_stream_preview(placeholder, raw_products: list[dict]) -> None:
         pass
 
 
-def _call_single_model(
-    client, model_name: str,
-    image_bytes: bytes, retailer: str, city: str, section_label: str,
-    live_placeholder=None, count_placeholder=None,
-) -> list[dict]:
-    """
-    Run one specific model on a section without the fallback chain.
-    Used by the Flash yield-threshold sweep to call full Flash directly
-    without triggering the Flash-Lite→Flash fallback chain.
-    """
-    context = (
-        f"\nContext: This store is in {city}, {retailer}. "
-        f"You are scanning the {section_label}."
-    )
-    stream = client.models.generate_content_stream(
-        model=model_name,
-        contents=[
-            SYSTEM_PROMPT + context,
-            types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
-        ],
-        config=types.GenerateContentConfig(
-            temperature=0.2,
-            max_output_tokens=16000,
-        ),
-    )
-    buffer       = ""
-    all_products = []
-
-    for chunk in stream:
-        if not chunk.text:
-            continue
-        buffer += chunk.text
-        while "\n" in buffer:
-            line, buffer = buffer.split("\n", 1)
-            line = line.strip().rstrip(",")
-            if not line or not line.startswith("{"):
-                continue
-            try:
-                product = json.loads(line)
-            except json.JSONDecodeError:
-                try:
-                    from json_repair import repair_json
-                    product = json.loads(repair_json(line))
-                except Exception:
-                    continue
-            if isinstance(product, dict) and product:
-                all_products.append(product)
-                if count_placeholder:
-                    count_placeholder.info(
-                        f"🔍 Flash sweep {section_label}... "
-                        f"**{len(all_products)} product(s) found**"
-                    )
-
-    remainder = buffer.strip().rstrip(",")
-    if remainder and remainder.startswith("{"):
-        try:
-            product = json.loads(remainder)
-            if isinstance(product, dict) and product:
-                all_products.append(product)
-        except Exception:
-            pass
-
-    return all_products
-
-
 def call_gemini_streaming(
     client,
     image_bytes: bytes,
@@ -473,7 +418,14 @@ def call_gemini_streaming(
     # Flash-Lite is the primary model — optimised for low latency, thinking disabled,
     # designed for high-volume extraction tasks. Expected ~8-10s per section.
     # Full Flash is the 503-only fallback — used only when Flash-Lite is unavailable.
-    model_sequence    = ["gemini-2.5-flash-lite", "gemini-2.5-flash"]
+    # Flash is primary — more thorough and consistent than Flash-Lite for dense scenes.
+    # Flash-Lite is the 503-only fallback.
+    model_sequence    = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
+
+    # 35-second stopclock per section. Flash typically completes in 25-30s on a
+    # well-stocked shelf, so this captures the vast majority of products while
+    # preventing runaway calls. Worst case: 2 sections × 35s = 70s per image.
+    SECTION_TIMEOUT_SECS = 35
     last_model_error  = ""
 
     for model_name in model_sequence:
@@ -492,8 +444,11 @@ def call_gemini_streaming(
 
             buffer       = ""
             all_products = []
+            section_start = time.time()
 
             for chunk in stream:
+                if time.time() - section_start > SECTION_TIMEOUT_SECS:
+                    break
                 if not chunk.text:
                     continue
                 buffer += chunk.text
@@ -592,51 +547,17 @@ def process_one_image(
                 count_placeholder.empty()
 
             # Split tall images into sections — each section gets full model attention
-            sections     = split_image_vertical(image_bytes)
-            all_data     = []
+            sections      = split_image_vertical(image_bytes)
+            all_data      = []
             section_warns = []
-
-            # Minimum products expected from a section of a well-stocked shelf.
-            # If Flash-Lite returns fewer than this, the section is likely dense
-            # or partially obscured — run it again with full Flash to sweep up
-            # what Lite missed. We take whichever result is larger.
-            MIN_SECTION_YIELD = 8
 
             for section_bytes, section_label in sections:
                 try:
-                    lite_products = call_gemini_streaming(
+                    section_products = call_gemini_streaming(
                         client, section_bytes, retailer, city,
                         section_label, live_placeholder, count_placeholder,
                     )
-
-                    if len(lite_products) < MIN_SECTION_YIELD:
-                        # Lite yield is low — sweep the same section with full Flash
-                        if count_placeholder:
-                            count_placeholder.info(
-                                f"🔄 {section_label.capitalize()} — "
-                                f"only {len(lite_products)} products found, "
-                                f"running full Flash sweep..."
-                            )
-                        try:
-                            # Temporarily override model sequence for full-Flash pass
-                            flash_products = _call_single_model(
-                                client, "gemini-2.5-flash",
-                                section_bytes, retailer, city, section_label,
-                                live_placeholder, count_placeholder,
-                            )
-                            # Take whichever result is more complete
-                            section_products = (
-                                flash_products
-                                if len(flash_products) > len(lite_products)
-                                else lite_products
-                            )
-                        except Exception:
-                            section_products = lite_products  # Flash failed — keep Lite
-                    else:
-                        section_products = lite_products
-
                     all_data.extend(section_products)
-
                 except Exception as sec_exc:
                     section_warns.append(f"{section_label}: {sec_exc}")
 
@@ -727,13 +648,13 @@ def process_one_image(
 
 
 # ── 8. MAIN APP ────────────────────────────────────────────────────────────────
-st.title("AI Shelf Intelligence")
+st.title("🔍 AI Shelf Intelligence")
 
 # ─── UPLOAD PANEL ─────────────────────────────────────────────────────────────
 if not st.session_state["processing"] and not st.session_state["audit_complete"]:
 
     uploaded = st.file_uploader(
-        "Upload shelf images or a zip file — name files as Retailer-City-ShelfID.jpg",
+        "Upload shelf images or a `.zip` file — name files as `Retailer-City-ShelfID.jpg`",
         type=["jpg", "jpeg", "png", "zip"],
         accept_multiple_files=True,
     )
@@ -741,13 +662,13 @@ if not st.session_state["processing"] and not st.session_state["audit_complete"]
     if uploaded:
         queue = load_uploaded_files(uploaded)
         if not queue:
-            st.warning("No valid images (.jpg / .jpeg / .png) found in the upload.")
+            st.warning("⚠️ No valid images (.jpg / .jpeg / .png) found in the upload.")
         else:
-            st.info(f"{len(queue)} image(s) ready to process.")
+            st.info(f"✅ **{len(queue)} image(s)** ready to process.")
             if not api_key:
-                st.warning("Please enter your Gemini API key in the sidebar before starting.")
+                st.warning("⚠️ Please enter your Gemini API key in the sidebar before starting.")
             else:
-                if st.button(f"Start Audit ({len(queue)} images)", type="primary"):
+                if st.button(f"🚀 Start Audit  ({len(queue)} images)", type="primary"):
                     st.session_state["image_queue"]    = queue
                     st.session_state["results"]        = []
                     st.session_state["failed_files"]   = []
@@ -764,27 +685,25 @@ if st.session_state["processing"]:
     idx   = st.session_state["current_index"]
     total = len(queue)
 
-    st.write("### Live Processing")
+    st.write("### ⏱️ Live Processing")
     progress_bar = st.progress(idx / total if total > 0 else 0)
     status_box   = st.empty()
 
     if idx < total:
         file_info = queue[idx]
         status_box.info(
-            f"Analyzing image {idx + 1} of {total}: {file_info['name']}"
+            f"🔍 Analysing image **{idx + 1} of {total}**: `{file_info['name']}`"
         )
 
         client = genai.Client(api_key=api_key)
 
-        # count_box: real-time ticker updating after every product found
-        # stream_table: rolling table preview updating every 5 rows
-        count_box    = st.empty()
+        # stream_table shows the rolling product table as the model scans each section.
+        # count_box is passed as None — the per-product ticker is hidden from the user.
         stream_table = st.empty()
 
-        df_chunk, error = process_one_image(client, file_info, stream_table, count_box)
+        df_chunk, error = process_one_image(client, file_info, stream_table, None)
 
-        # Clear the streaming UI — cumulative results table takes over below
-        count_box.empty()
+        # Clear the in-progress stream — cumulative table takes over below
         stream_table.empty()
 
         # Free image bytes immediately — keeps memory flat across large batches
@@ -809,16 +728,16 @@ if st.session_state["processing"]:
         if st.session_state["results"]:
             live_df = build_results_df()
             st.caption(
-                f"{len(st.session_state['results'])} processed  |  "
-                f"{len(st.session_state['failed_files'])} failed  |  "
-                f"{len(live_df)} products extracted so far"
+                f"✅ {len(st.session_state['results'])} processed  |  "
+                f"⚠️ {len(st.session_state['failed_files'])} failed  |  "
+                f"📦 {len(live_df)} products extracted so far"
             )
             st.dataframe(
                 live_df.style.apply(highlight_low_confidence, axis=1),
                 use_container_width=True,
             )
             st.download_button(
-                "Download current results (CSV)",
+                "📥 Download current results (CSV)",
                 data=live_df.to_csv(index=False).encode("utf-8"),
                 file_name="shelf_intelligence_partial.csv",
                 mime="text/csv",
@@ -845,18 +764,18 @@ if is_complete or (not st.session_state["processing"] and has_results):
 
     if is_complete:
         st.success(
-            f"Audit complete — {n_ok} image(s) processed successfully"
-            + (f", {n_fail} failed." if n_fail else ".")
+            f"✅ Audit complete — **{n_ok}** image(s) processed successfully"
+            + (f", **{n_fail}** failed." if n_fail else ".")
         )
     else:
-        st.warning(f"Processing interrupted. {n_ok} image(s) completed.")
+        st.warning(f"⚠️ Processing interrupted. **{n_ok}** image(s) completed.")
 
     if n_fail:
-        with st.expander(f"{n_fail} image(s) failed — click for details"):
+        with st.expander(f"⚠️ {n_fail} image(s) failed — click for details"):
             for item in st.session_state["failed_files"]:
                 st.error(f"**{item['name']}**\n\n{item['error']}")
 
-    st.write(f"### Results — {len(final_df)} products across {n_ok} image(s)")
+    st.write(f"### 📊 Results — {len(final_df)} products across {n_ok} image(s)")
     st.dataframe(
         final_df.style.apply(highlight_low_confidence, axis=1),
         use_container_width=True,
@@ -865,13 +784,13 @@ if is_complete or (not st.session_state["processing"] and has_results):
     col_dl, col_reset = st.columns([2, 1])
     with col_dl:
         st.download_button(
-            "Download Full Report (CSV)",
+            "📥 Download Full Report (CSV)",
             data=final_df.to_csv(index=False).encode("utf-8"),
             file_name="shelf_intelligence_output.csv",
             mime="text/csv",
         )
     with col_reset:
-        if st.button("Clear and Start New Audit"):
+        if st.button("🗑️ Clear & Start New Audit"):
             for k, v in _DEFAULTS.items():
                 st.session_state[k] = (
                     []    if isinstance(v, list)
