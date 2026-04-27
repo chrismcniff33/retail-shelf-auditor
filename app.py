@@ -327,7 +327,7 @@ def call_openai(client: OpenAI, image_bytes: bytes, retailer: str, city: str) ->
         model="gpt-4o-mini",
         response_format={"type": "json_object"},
         temperature=0.1,
-        max_tokens=4096,
+        max_tokens=16000,
         messages=[
             {
                 "role": "user",
@@ -347,6 +347,15 @@ def call_openai(client: OpenAI, image_bytes: bytes, retailer: str, city: str) ->
             }
         ],
     )
+
+    # Warn if the model hit the token limit mid-response — products would be missing
+    finish_reason = response.choices[0].finish_reason
+    if finish_reason == "length":
+        raise ValueError(
+            "Response was truncated (finish_reason=length). "
+            "The shelf may have more products than the model could output in one pass. "
+            "Try splitting the image into closer-cropped sections."
+        )
 
     raw = response.choices[0].message.content
     if not raw:
