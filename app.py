@@ -336,7 +336,7 @@ def call_gemini(client, image_bytes: bytes, retailer: str, city: str) -> list[di
     Raises a descriptive exception on any failure.
     """
     response = client.models.generate_content(
-        model="gemini-2.0-flash",
+        model="gemini-2.5-flash",
         contents=[
             SYSTEM_PROMPT + f"\nContext: This store is in {city}, {retailer}.",
             types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
