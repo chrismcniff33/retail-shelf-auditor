@@ -185,9 +185,9 @@ with st.sidebar:
 
 def parse_filename(filename: str) -> tuple[str, str]:
     try:
-        parts = filename.rsplit(".", 1)[0].split("-")
-        retailer = parts[0].strip() if len(parts) > 0 else "Unknown"
-        city     = parts[1].strip() if len(parts) > 1 else "Unknown"
+        parts    = filename.rsplit(".", 1)[0].split("-")
+        retailer = parts[0].strip() if len(parts) > 0 and parts[0].strip() else "Unknown"
+        city     = parts[1].strip() if len(parts) > 1 and parts[1].strip() else "Unknown"
         return retailer, city
     except Exception:
         return "Unknown", "Unknown"
@@ -381,6 +381,75 @@ def _render_stream_preview(placeholder, raw_products: list[dict]) -> None:
         pass
 
 
+def _call_single_model(
+    client, model_name: str,
+    image_bytes: bytes, retailer: str, city: str, section_label: str,
+    live_placeholder=None, count_placeholder=None,
+) -> list[dict]:
+    """
+    Run one specific model on a section with the standard stopclock.
+    Used by the Flash yield-threshold sweep to call full Flash directly
+    without triggering the Flash-Lite→Flash fallback chain.
+    """
+    context = (
+        f"\nContext: This store is in {city}, {retailer}. "
+        f"You are scanning the {section_label}."
+    )
+    stream = client.models.generate_content_stream(
+        model=model_name,
+        contents=[
+            SYSTEM_PROMPT + context,
+            types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+        ],
+        config=types.GenerateContentConfig(
+            temperature=0.2,
+            max_output_tokens=16000,
+        ),
+    )
+    buffer       = ""
+    all_products = []
+    start        = time.time()
+    TIMEOUT      = 25   # Flash gets a slightly longer window than Lite
+
+    for chunk in stream:
+        if time.time() - start > TIMEOUT:
+            break
+        if not chunk.text:
+            continue
+        buffer += chunk.text
+        while "\n" in buffer:
+            line, buffer = buffer.split("\n", 1)
+            line = line.strip().rstrip(",")
+            if not line or not line.startswith("{"):
+                continue
+            try:
+                product = json.loads(line)
+            except json.JSONDecodeError:
+                try:
+                    from json_repair import repair_json
+                    product = json.loads(repair_json(line))
+                except Exception:
+                    continue
+            if isinstance(product, dict) and product:
+                all_products.append(product)
+                if count_placeholder:
+                    count_placeholder.info(
+                        f"🔍 Flash sweep {section_label}... "
+                        f"**{len(all_products)} product(s) found**"
+                    )
+
+    remainder = buffer.strip().rstrip(",")
+    if remainder and remainder.startswith("{"):
+        try:
+            product = json.loads(remainder)
+            if isinstance(product, dict) and product:
+                all_products.append(product)
+        except Exception:
+            pass
+
+    return all_products
+
+
 def call_gemini_streaming(
     client,
     image_bytes: bytes,
@@ -425,7 +494,7 @@ def call_gemini_streaming(
                     types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
                 ],
                 config=types.GenerateContentConfig(
-                    temperature=0.4,
+                    temperature=0.2,
                     max_output_tokens=16000,
                 ),
             )
@@ -540,20 +609,52 @@ def process_one_image(
                 count_placeholder.empty()
 
             # Split tall images into sections — each section gets full model attention
-            sections = split_image_vertical(image_bytes)
-            all_data      = []
-            section_warns = []   # non-fatal section failures logged here
+            sections     = split_image_vertical(image_bytes)
+            all_data     = []
+            section_warns = []
+
+            # Minimum products expected from a section of a well-stocked shelf.
+            # If Flash-Lite returns fewer than this, the section is likely dense
+            # or partially obscured — run it again with full Flash to sweep up
+            # what Lite missed. We take whichever result is larger.
+            MIN_SECTION_YIELD = 8
 
             for section_bytes, section_label in sections:
                 try:
-                    section_products = call_gemini_streaming(
+                    lite_products = call_gemini_streaming(
                         client, section_bytes, retailer, city,
                         section_label, live_placeholder, count_placeholder,
                     )
+
+                    if len(lite_products) < MIN_SECTION_YIELD:
+                        # Lite yield is low — sweep the same section with full Flash
+                        if count_placeholder:
+                            count_placeholder.info(
+                                f"🔄 {section_label.capitalize()} — "
+                                f"only {len(lite_products)} products found, "
+                                f"running full Flash sweep..."
+                            )
+                        try:
+                            # Temporarily override model sequence for full-Flash pass
+                            flash_products = _call_single_model(
+                                client, "gemini-2.5-flash",
+                                section_bytes, retailer, city, section_label,
+                                live_placeholder, count_placeholder,
+                            )
+                            # Take whichever result is more complete
+                            section_products = (
+                                flash_products
+                                if len(flash_products) > len(lite_products)
+                                else lite_products
+                            )
+                        except Exception:
+                            section_products = lite_products  # Flash failed — keep Lite
+                    else:
+                        section_products = lite_products
+
                     all_data.extend(section_products)
+
                 except Exception as sec_exc:
-                    # A single section failing (e.g. 503) should not discard
-                    # results already extracted from other sections.
                     section_warns.append(f"{section_label}: {sec_exc}")
 
             if not all_data:
@@ -576,13 +677,25 @@ def process_one_image(
                     seen.add(key)
                     unique_data.append(product)
 
-            # Remove any rows where both Brand and Product_Name are empty —
-            # these are malformed model outputs (e.g. parsing artefacts) that
-            # slipped through deduplication because their key was unique.
-            unique_data = [
-                p for p in unique_data
-                if str(p.get("Brand", "")).strip() or str(p.get("Product_Name", "")).strip()
-            ]
+            # Remove malformed rows — either both Brand and Product_Name empty,
+            # or the row has a name/brand but is missing more than 10 of the 17
+            # expected fields (indicates a parsing artefact, not a real product).
+            def _is_valid_product(p: dict) -> bool:
+                has_name  = bool(str(p.get("Product_Name", "")).strip())
+                has_brand = bool(str(p.get("Brand", "")).strip())
+                if not has_name and not has_brand:
+                    return False
+                # Count populated fields — a real product row should have most fields
+                populated = sum(
+                    1 for k in [
+                        "Product_Name", "Brand", "Manufacturer", "Category",
+                        "Country", "Pack_Type", "Pack_Material", "Position", "Confidence"
+                    ]
+                    if str(p.get(k, "")).strip()
+                )
+                return populated >= 5
+
+            unique_data = [p for p in unique_data if _is_valid_product(p)]
 
             df = pd.DataFrame(unique_data)
             if df.empty:
@@ -593,8 +706,8 @@ def process_one_image(
                 "",
             )
             df["Image name"] = name
-            df["Retailer"]   = retailer
-            df["City"]       = city
+            df["Retailer"]   = retailer if retailer else "Unknown"
+            df["City"]       = city     if city     else "Unknown"
 
             for col in AI_EXPECTED_COLS:
                 if col not in df.columns:
