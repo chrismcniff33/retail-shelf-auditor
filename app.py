@@ -67,8 +67,8 @@ DESIRED_COLS = [
     "Image name", "Country", "City", "Retailer", "Category",
     "Product name", "Brand", "Manufacturer",
     "Pack size (ml/g)", "Quantity", "Price (local currency)", "Promo",
-    "Pack type", "Pack material", "Main colour(s)", "Flavour(s)",
-    "Ingredients", "Calories (kcal)", "On-pack claims",
+    "Pack type", "Pack material", "Main colour(s)", "Flavour/Scent",
+    "On-pack claims",
     "Shelf position", "Facings", "Confidence level",
 ]
 
@@ -79,8 +79,7 @@ COL_RENAME = {
     "Pack_Type":     "Pack type",
     "Pack_Material": "Pack material",
     "Pack_Colour":   "Main colour(s)",
-    "Flavour":       "Flavour(s)",
-    "Calories":      "Calories (kcal)",
+    "Flavour":       "Flavour/Scent",
     "On_pack_claims":"On-pack claims",
     "Position":      "Shelf position",
     "Confidence":    "Confidence level",
@@ -89,7 +88,7 @@ COL_RENAME = {
 # All fields the AI is expected to return (pre-rename names)
 AI_EXPECTED_COLS = list(COL_RENAME.keys()) + [
     "Country", "Category", "Brand", "Manufacturer",
-    "Quantity", "Promo", "Ingredients", "Facings",
+    "Quantity", "Promo", "Facings",
 ]
 
 
@@ -129,20 +128,23 @@ Task: Extract all visible products and return a JSON list of objects with these 
 3.  "Manufacturer":   Refer to the DICTIONARY above.
 4.  "Category":       Map to the most GRANULAR Euromonitor category possible.
 5.  "Country":        Identify the Country based on the City/Retailer provided.
-6.  "Pack_Size":      Convert soft drinks to ml, solid foods to g. Numbers ONLY. If unreadable, estimate. If impossible, write ''.
+6.  "Pack_Size":      Size in ml (liquids) or g (solids). Numbers ONLY. Use this priority order:
+                      a) READ directly from the label — check front, side panel, cap, and base of pack.
+                      b) INFER from identical products — if the same SKU appears elsewhere in this image with a readable size, apply that size to all matching products.
+                      c) APPLY brand knowledge — use your pre-trained knowledge of standard sizes for well-known products (e.g. Coca-Cola 330ml can, Heineken 500ml bottle, Lay's 150g bag).
+                      d) ESTIMATE from visual proportion — compare the pack height/volume against nearby objects or known-size products on the same shelf and give a best estimate.
+                      Only write '' if all four methods fail completely.
 7.  "Quantity":       Unit count if visible. Else '1'.
 8.  "Price":          Tag price. Numbers ONLY. If missing, write ''.
 9.  "Promo":          Promo tag description. If none, write ''.
 10. "Pack_Type":      MAX 1 WORD. Packaging type only (e.g., Bottle, Can, Carton, Box, Pouch).
 11. "Pack_Material":  MAX 1 WORD. Material only (e.g., Plastic, Glass, Metal, Aluminium, Cardboard).
 12. "Pack_Colour":    MAX 3 WORDS. Primary colour(s) of packaging (e.g., Red, Blue and Silver).
-13. "Flavour":        MAX 3 WORDS (e.g., Cherry Vanilla, Original). If none, write ''.
-14. "Ingredients":    DATA ENRICHMENT — pre-trained knowledge only. List ingredients. If unknown, write ''.
-15. "Calories":       DATA ENRICHMENT — pre-trained knowledge only. MAX 3 WORDS (e.g., 45 kcal/100ml). If unknown, write ''.
-16. "On_pack_claims": Visible health, taste, or sustainability claims (e.g., 'Zero Sugar'). If none, write ''.
-17. "Position":       Shelf level: Top, Middle, or Bottom.
-18. "Facings":        Integer — count of identical items visible side-by-side.
-19. "Confidence":     'High' if text clearly readable, 'Low' if blurry or estimated.
+13. "Flavour":        MAX 3 WORDS. Flavour or scent variant (e.g., Cherry Vanilla, Lavender, Original). If none, write ''.
+14. "On_pack_claims": Visible health, taste, or sustainability claims (e.g., 'Zero Sugar'). If none, write ''.
+15. "Position":       Shelf level: Top, Middle, or Bottom.
+16. "Facings":        Integer — count of identical items visible side-by-side.
+17. "Confidence":     'High' if text clearly readable, 'Low' if blurry or estimated.
 """
 
 
@@ -185,17 +187,24 @@ def parse_filename(filename: str) -> tuple[str, str]:
 
 def compress_image(raw_bytes: bytes) -> bytes | None:
     """
-    Resize to max 1024×1024 and re-encode at quality 82.
-    Reduces image token cost by ~70 % vs 2048px / quality 95
-    while retaining all label detail needed for product identification.
+    Resize to max 800×800 and re-encode at quality 85.
+
+    Resolution choice rationale:
+    - Pack size accuracy is recovered via the 4-step prompt instruction
+      (read → infer from identical products → brand knowledge → visual estimate),
+      not by sending larger images. The prompt fix works at any resolution.
+    - 800px keeps image token count low enough that gemini-2.5-flash
+      consistently responds in 12–16s, hitting the <20s per image target
+      when combined with ~2s Streamlit rerun overhead.
+    - Going higher (1024px+) pushes API time to 25–35s with this model.
     """
     try:
         with Image.open(io.BytesIO(raw_bytes)) as img:
             if img.mode != "RGB":
                 img = img.convert("RGB")
-            img.thumbnail((1024, 1024))
+            img.thumbnail((800, 800))
             buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=82)
+            img.save(buf, format="JPEG", quality=85)
             return buf.getvalue()
     except Exception:
         return None
