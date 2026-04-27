@@ -387,7 +387,7 @@ def _call_single_model(
     live_placeholder=None, count_placeholder=None,
 ) -> list[dict]:
     """
-    Run one specific model on a section with the standard stopclock.
+    Run one specific model on a section without the fallback chain.
     Used by the Flash yield-threshold sweep to call full Flash directly
     without triggering the Flash-Lite→Flash fallback chain.
     """
@@ -408,12 +408,8 @@ def _call_single_model(
     )
     buffer       = ""
     all_products = []
-    start        = time.time()
-    TIMEOUT      = 25   # Flash gets a slightly longer window than Lite
 
     for chunk in stream:
-        if time.time() - start > TIMEOUT:
-            break
         if not chunk.text:
             continue
         buffer += chunk.text
@@ -477,13 +473,8 @@ def call_gemini_streaming(
     # Flash-Lite is the primary model — optimised for low latency, thinking disabled,
     # designed for high-volume extraction tasks. Expected ~8-10s per section.
     # Full Flash is the 503-only fallback — used only when Flash-Lite is unavailable.
-    model_sequence = ["gemini-2.5-flash-lite", "gemini-2.5-flash"]
-
-    # Hard stopclock per section: break out of the stream after this many seconds
-    # and return whatever products have been extracted so far. Prevents any single
-    # section call from blowing the ~20s per image target.
-    SECTION_TIMEOUT_SECS = 20
-    last_model_error = ""
+    model_sequence    = ["gemini-2.5-flash-lite", "gemini-2.5-flash"]
+    last_model_error  = ""
 
     for model_name in model_sequence:
         try:
@@ -501,15 +492,8 @@ def call_gemini_streaming(
 
             buffer       = ""
             all_products = []
-            section_start = time.time()
-            timed_out     = False
 
             for chunk in stream:
-                # Stopclock — break out after SECTION_TIMEOUT_SECS and return
-                # whatever products have been extracted rather than blocking further.
-                if time.time() - section_start > SECTION_TIMEOUT_SECS:
-                    timed_out = True
-                    break
                 if not chunk.text:
                     continue
                 buffer += chunk.text
@@ -554,16 +538,15 @@ def call_gemini_streaming(
             if live_placeholder and all_products:
                 _render_stream_preview(live_placeholder, all_products)
             if count_placeholder and all_products:
-                timeout_note = " (stopclock — partial)" if timed_out else ""
                 count_placeholder.info(
-                    f"✅ {section_label.capitalize()} complete ({model_name}{timeout_note}) — "
+                    f"✅ {section_label.capitalize()} complete ({model_name}) — "
                     f"**{len(all_products)} product(s) found**"
                 )
 
             if not all_products:
                 raise ValueError(f"No product rows extracted from {section_label}.")
 
-            return all_products  # Success — return immediately
+            return all_products
 
         except Exception as exc:
             err_str   = str(exc)
