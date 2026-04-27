@@ -1,9 +1,9 @@
 import streamlit as st
-from google import genai
-from google.genai import types
+from openai import OpenAI
 import pandas as pd
 from PIL import Image
 import io
+import base64
 import hmac
 import re
 import json
@@ -39,7 +39,7 @@ def check_password():
         on_change=_submitted,
     )
     if st.session_state.get("authenticated") is False:
-        st.error("😕 Incorrect password — please try again.")
+        st.error("Incorrect password — please try again.")
     return False
 
 if not check_password():
@@ -47,14 +47,13 @@ if not check_password():
 
 
 # ── 3. SESSION STATE ───────────────────────────────────────────────────────────
-# All state lives here so it survives every Streamlit re-render.
 _DEFAULTS = {
-    "image_queue":    [],    # [{"name": str, "bytes": bytes}] — loaded once at upload
-    "processing":     False, # True while the audit loop is running
-    "current_index":  0,     # which image we are on
-    "results":        [],    # list of per-image DataFrames, appended as we go
-    "failed_files":   [],    # [{"name": str, "error": str}] — with full error detail
-    "audit_complete": False, # flipped to True when every image has been attempted
+    "image_queue":    [],
+    "processing":     False,
+    "current_index":  0,
+    "results":        [],
+    "failed_files":   [],
+    "audit_complete": False,
 }
 for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
@@ -62,7 +61,6 @@ for _k, _v in _DEFAULTS.items():
 
 
 # ── 4. CONSTANTS ───────────────────────────────────────────────────────────────
-# Defined once — referenced everywhere.  Edit here and it propagates.
 DESIRED_COLS = [
     "Image name", "Country", "City", "Retailer", "Category",
     "Product name", "Brand", "Manufacturer",
@@ -73,60 +71,22 @@ DESIRED_COLS = [
 ]
 
 COL_RENAME = {
-    "Product_Name":  "Product name",
-    "Pack_Size":     "Pack size (ml/g)",
-    "Price":         "Price (local currency)",
-    "Pack_Type":     "Pack type",
-    "Pack_Material": "Pack material",
-    "Pack_Colour":   "Main colour(s)",
-    "Flavour":       "Flavour/Scent",
-    "On_pack_claims":"On-pack claims",
-    "Position":      "Shelf position",
-    "Confidence":    "Confidence level",
+    "Product_Name":   "Product name",
+    "Pack_Size":      "Pack size (ml/g)",
+    "Price":          "Price (local currency)",
+    "Pack_Type":      "Pack type",
+    "Pack_Material":  "Pack material",
+    "Pack_Colour":    "Main colour(s)",
+    "Flavour":        "Flavour/Scent",
+    "On_pack_claims": "On-pack claims",
+    "Position":       "Shelf position",
+    "Confidence":     "Confidence level",
 }
 
-# All fields the AI is expected to return (pre-rename names)
 AI_EXPECTED_COLS = list(COL_RENAME.keys()) + [
     "Country", "Category", "Brand", "Manufacturer",
     "Quantity", "Promo", "Facings",
 ]
-
-# ── RESPONSE SCHEMA ────────────────────────────────────────────────────────────
-# Enforces the exact JSON structure Gemini must return on every call.
-# This eliminates JSON parse errors, field omissions, markdown fences,
-# and dict-wrapping — the primary sources of app glitchiness.
-# All 17 fields are required so every product row is always complete.
-RESPONSE_SCHEMA = types.Schema(
-    type=types.Type.ARRAY,
-    items=types.Schema(
-        type=types.Type.OBJECT,
-        properties={
-            "Product_Name":   types.Schema(type=types.Type.STRING),
-            "Brand":          types.Schema(type=types.Type.STRING),
-            "Manufacturer":   types.Schema(type=types.Type.STRING),
-            "Category":       types.Schema(type=types.Type.STRING),
-            "Country":        types.Schema(type=types.Type.STRING),
-            "Pack_Size":      types.Schema(type=types.Type.STRING),
-            "Quantity":       types.Schema(type=types.Type.STRING),
-            "Price":          types.Schema(type=types.Type.STRING),
-            "Promo":          types.Schema(type=types.Type.STRING),
-            "Pack_Type":      types.Schema(type=types.Type.STRING),
-            "Pack_Material":  types.Schema(type=types.Type.STRING),
-            "Pack_Colour":    types.Schema(type=types.Type.STRING),
-            "Flavour":        types.Schema(type=types.Type.STRING),
-            "On_pack_claims": types.Schema(type=types.Type.STRING),
-            "Position":       types.Schema(type=types.Type.STRING),
-            "Facings":        types.Schema(type=types.Type.STRING),
-            "Confidence":     types.Schema(type=types.Type.STRING),
-        },
-        required=[
-            "Product_Name", "Brand", "Manufacturer", "Category", "Country",
-            "Pack_Size", "Quantity", "Price", "Promo", "Pack_Type",
-            "Pack_Material", "Pack_Colour", "Flavour", "On_pack_claims",
-            "Position", "Facings", "Confidence",
-        ],
-    )
-)
 
 
 # ── 5. SYSTEM PROMPT ───────────────────────────────────────────────────────────
@@ -138,14 +98,14 @@ CRITICAL INSTRUCTION: Scan systematically (top-to-bottom, left-to-right) to ensu
 
 --- MANUFACTURER DICTIONARY ---
 Use this mapping to assign "Manufacturer". If a brand is not listed, use your internal knowledge.
-Postobón S.A.: Postobón, Hit, Cristal, Bretaña, Colombiana, Popular, Freskola, Hipinto, Speed Max, Peak, Sr. Toronjo, Agua Oasis.
-PepsiCo: Pepsi, 7Up, Mirinda, Mountain Dew, H2Oh!, Gatorade, Aquafina, Teem, Lipton Ice Tea (JV), Lay's, Doritos.
+Postobon S.A.: Postobon, Hit, Cristal, Bretana, Colombiana, Popular, Freskola, Hipinto, Speed Max, Peak, Sr. Toronjo, Agua Oasis.
+PepsiCo: Pepsi, 7Up, Mirinda, Mountain Dew, H2Oh!, Gatorade, Aquafina, Teem, Lipton Ice Tea (JV), Lays, Doritos.
 The Coca-Cola Company: Coca-Cola, Sprite, Fanta, Quatro, Brisa, Manantial, Valle, Del Valle, Powerade, Fuze Tea, Eva, Five Alive.
 Quala: Vive100%, Suntea, Saviloe, Ego, Light, Bonyurt (Alpina JV).
-Bavaria (AB InBev): Pony Malta, Malta Leona, Aguila, Poker, Club Colombia, Costeña, Corona, Stella Artois, Budweiser.
+Bavaria (AB InBev): Pony Malta, Malta Leona, Aguila, Poker, Club Colombia, Costena, Corona, Stella Artois, Budweiser.
 Heineken N.V.: Heineken, Amstel, Sol, Desperados.
 Diageo: Smirnoff, Johnnie Walker, Baileys, Guinness, Malta Guinness, Orijin.
-Nestlé: Milo, Nescafé, Pure Life, Nestea, Bikkle.
+Nestle: Milo, Nescafe, Pure Life, Nestea, Bikkle.
 Suntory / Asahi / GSK: Ribena, Lucozade, Aquarius, Calpis.
 La Casera Company: La Casera, Bold, Nirvana.
 Rite Foods: Bigi, Fearless, Rite.
@@ -153,61 +113,62 @@ TGI Group: Chivita, Hollandia.
 Aje Group: Big Cola, Cifrut, Sporade, Cielo, Pulp.
 --- END DICTIONARY ---
 
-Task: Extract all visible products and return a JSON list of objects with these exact keys. For ANY unknown value, return an empty string ('').
+Task: Extract all visible products. Return a JSON object with a single key "products" containing an array of product objects.
+Each product object must contain ALL of the following keys. Return an empty string for any unknown value.
 
 1.  "Product_Name":   Specific name on label.
 2.  "Brand":          Brand name.
-3.  "Manufacturer":   Refer to the DICTIONARY above.
-4.  "Category":       Map to the most GRANULAR Euromonitor category possible.
-5.  "Country":        Identify the Country based on the City/Retailer provided.
-6.  "Pack_Size":      Size in ml (liquids) or g (solids). Numbers ONLY. Use this priority order:
-                      a) READ directly from the label — check front, side panel, cap, and base of pack.
-                      b) INFER from identical products — if the same SKU appears elsewhere in this image with a readable size, apply that size to all matching products.
-                      c) APPLY brand knowledge — use your pre-trained knowledge of standard sizes for well-known products (e.g. Coca-Cola 330ml can, Heineken 500ml bottle, Lay's 150g bag).
-                      d) ESTIMATE from visual proportion — compare the pack height/volume against nearby objects or known-size products on the same shelf and give a best estimate.
-                      Only write '' if all four methods fail completely.
-7.  "Quantity":       Unit count if visible. Else '1'.
-8.  "Price":          Tag price. Numbers ONLY. If missing, write ''.
-9.  "Promo":          Promo tag description. If none, write ''.
-10. "Pack_Type":      MAX 1 WORD. Packaging type only (e.g., Bottle, Can, Carton, Box, Pouch).
-11. "Pack_Material":  MAX 1 WORD. Material only (e.g., Plastic, Glass, Metal, Aluminium, Cardboard).
-12. "Pack_Colour":    MAX 3 WORDS. Primary colour(s) of packaging (e.g., Red, Blue and Silver).
-13. "Flavour":        MAX 3 WORDS. Flavour or scent variant (e.g., Cherry Vanilla, Lavender, Original). If none, write ''.
-14. "On_pack_claims": Visible health, taste, or sustainability claims (e.g., 'Zero Sugar'). If none, write ''.
-15. "Position":       Shelf level: Top, Middle, or Bottom.
-16. "Facings":        Integer — count of identical items visible side-by-side.
-17. "Confidence":     'High' if text clearly readable, 'Low' if blurry or estimated.
+3.  "Manufacturer":   Use the DICTIONARY above. If not listed, use your knowledge.
+4.  "Category":       Most granular Euromonitor category possible.
+5.  "Country":        Country based on City/Retailer context.
+6.  "Pack_Size":      ml (liquids) or g (solids). Numbers ONLY. Priority:
+                      a) Read from label (front, side, cap, base).
+                      b) Infer from identical products visible elsewhere in the image.
+                      c) Apply brand knowledge (e.g. Coca-Cola 330ml can, Heineken 500ml bottle).
+                      d) Estimate from visual proportion vs nearby known products.
+                      Return empty string only if all four methods fail.
+7.  "Quantity":       Unit count if visible, else '1'.
+8.  "Price":          Numbers ONLY from price tag. Empty string if missing.
+9.  "Promo":          Promo tag description. Empty string if none.
+10. "Pack_Type":      ONE WORD — packaging type (Bottle, Can, Carton, Box, Pouch, etc.).
+11. "Pack_Material":  ONE WORD — material (Plastic, Glass, Metal, Aluminium, Cardboard, etc.).
+12. "Pack_Colour":    MAX 3 WORDS — primary colour(s) of packaging.
+13. "Flavour":        MAX 3 WORDS — flavour or scent variant. Empty string if none.
+14. "On_pack_claims": Visible health, sustainability or taste claims. Empty string if none.
+15. "Position":       Shelf level — Top, Middle, or Bottom.
+16. "Facings":        Integer — identical items visible side-by-side.
+17. "Confidence":     High if text clearly readable. Low if blurry or estimated.
 """
 
 
 # ── 6. SIDEBAR ─────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.header("⚙️ Settings")
-    if "GOOGLE_API_KEY" in st.secrets:
-        api_key = st.secrets["GOOGLE_API_KEY"]
-        st.success("API key loaded ✅")
+    st.header("Settings")
+    if "OPENAI_API_KEY" in st.secrets:
+        api_key = st.secrets["OPENAI_API_KEY"]
+        st.success("API key loaded")
     else:
-        api_key = st.text_input("Gemini API Key", type="password")
+        api_key = st.text_input("OpenAI API Key", type="password")
         if not api_key:
             st.warning("API key required to start.")
 
     st.divider()
-    st.subheader("💰 Cost & Usage")
-    st.info("Approx. $0.60–$1.00 per 1,000 images processed.")
+    st.subheader("Cost and Usage")
+    st.info("Approx. $1.50-2.00 per 1,000 images (GPT-4o-mini).")
     st.divider()
     st.markdown("""
-    ### 📝 Instructions
-    1. **Rename files**: `Retailer-City-ShelfID.jpg`
-    2. Upload images or a `.zip` folder
-    3. Click **Start Audit**
-    4. Results update after each image — safe to download at any time
+    ### Instructions
+    1. **Rename files**: Retailer-City-ShelfID.jpg
+    2. Upload images or a zip folder
+    3. Click Start Audit
+    4. Results update after each image
+    5. Download available at any time
     """)
 
 
 # ── 7. HELPER FUNCTIONS ────────────────────────────────────────────────────────
 
 def parse_filename(filename: str) -> tuple[str, str]:
-    """Extract retailer and city from Retailer-City-ShelfID.jpg naming convention."""
     try:
         parts = filename.rsplit(".", 1)[0].split("-")
         retailer = parts[0].strip() if len(parts) > 0 else "Unknown"
@@ -219,16 +180,9 @@ def parse_filename(filename: str) -> tuple[str, str]:
 
 def compress_image(raw_bytes: bytes) -> bytes | None:
     """
-    Resize to max 800×800 and re-encode at quality 85.
-
-    Resolution choice rationale:
-    - Pack size accuracy is recovered via the 4-step prompt instruction
-      (read → infer from identical products → brand knowledge → visual estimate),
-      not by sending larger images. The prompt fix works at any resolution.
-    - 800px keeps image token count low enough that gemini-2.5-flash
-      consistently responds in 12–16s, hitting the <20s per image target
-      when combined with ~2s Streamlit rerun overhead.
-    - Going higher (1024px+) pushes API time to 25–35s with this model.
+    Resize to max 800x800, JPEG quality 85.
+    At this resolution GPT-4o-mini reads shelf labels reliably
+    and responds in 5-12 seconds per image.
     """
     try:
         with Image.open(io.BytesIO(raw_bytes)) as img:
@@ -246,14 +200,13 @@ def standardize_pack_size(val) -> str:
     s = str(val).strip().lower()
     if s in ("n/a", "nan", "none", "", "null", "unknown"):
         return ""
-    # Determine unit multiplier
     if "ml" in s:
         multiplier = 1
-    elif "l" in s:          # litres → ml
+    elif "l" in s:
         multiplier = 1000
-    elif "kg" in s:         # kg → g
+    elif "kg" in s:
         multiplier = 1000
-    else:                   # already g or unitless
+    else:
         multiplier = 1
     m = re.search(r"[\d.]+", s.replace(",", "."))
     if m:
@@ -266,7 +219,6 @@ def standardize_pack_size(val) -> str:
 
 
 def standardize_prices(df: pd.DataFrame) -> pd.DataFrame:
-    """Parse, outlier-correct, and reformat the Price column."""
     if "Price" not in df.columns:
         return df
 
@@ -277,7 +229,6 @@ def standardize_prices(df: pd.DataFrame) -> pd.DataFrame:
         s = re.sub(r"[^\d.,]", "", s)
         if not s:
             return None
-        # Disambiguate comma vs decimal separator
         if "," in s and "." in s:
             s = (s.replace(".", "").replace(",", ".")
                  if s.rfind(",") > s.rfind(".")
@@ -322,7 +273,6 @@ def highlight_low_confidence(row) -> list[str]:
 
 
 def build_results_df() -> pd.DataFrame:
-    """Combine all result chunks into one clean, column-ordered DataFrame."""
     chunks = st.session_state["results"]
     if not chunks:
         return pd.DataFrame(columns=DESIRED_COLS)
@@ -334,11 +284,6 @@ def build_results_df() -> pd.DataFrame:
 
 
 def load_uploaded_files(uploaded_files) -> list[dict]:
-    """
-    Read all uploaded files (or zip contents) into memory as bytes.
-    Storing bytes in session state means we never depend on a temp directory
-    that Streamlit might delete between re-renders.
-    """
     queue = []
     for f in uploaded_files:
         if f.name.lower().endswith(".zip"):
@@ -358,66 +303,84 @@ def load_uploaded_files(uploaded_files) -> list[dict]:
                                     "bytes": compressed,
                                 })
                             else:
-                                st.warning(f"⚠️ Could not read `{n.split('/')[-1]}` from zip — skipping.")
+                                st.warning(f"Could not read {n.split('/')[-1]} from zip — skipping.")
             except Exception as e:
-                st.warning(f"⚠️ Could not read `{f.name}`: {e}")
+                st.warning(f"Could not read {f.name}: {e}")
         elif f.name.lower().endswith((".jpg", ".jpeg", ".png")):
             compressed = compress_image(f.read())
             if compressed:
                 queue.append({"name": f.name, "bytes": compressed})
             else:
-                st.warning(f"⚠️ Could not read `{f.name}` — skipping.")
+                st.warning(f"Could not read {f.name} — skipping.")
     return queue
 
 
-def call_gemini(client, image_bytes: bytes, retailer: str, city: str) -> list[dict]:
+def call_openai(client: OpenAI, image_bytes: bytes, retailer: str, city: str) -> list[dict]:
     """
-    Send one image to Gemini and return a list of product dicts.
+    Send one shelf image to GPT-4o-mini and return a list of product dicts.
+    json_object response format guarantees valid JSON on every call.
+    temperature=0.1 ensures consistent, deterministic field extraction.
+    """
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
 
-    response_schema guarantees:
-      - Output is always a JSON array (no dict-wrapping)
-      - All 17 fields are always present on every product row
-      - No markdown fences, no malformed JSON, no missing keys
-    temperature=0.1 makes extraction highly deterministic and consistent.
-    Raises a descriptive exception on any failure so the caller can log it.
-    """
-    response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=[
-            SYSTEM_PROMPT + f"\nContext: This store is in {city}, {retailer}.",
-            types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        response_format={"type": "json_object"},
+        temperature=0.1,
+        max_tokens=4096,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": SYSTEM_PROMPT + f"\nContext: This store is in {city}, {retailer}.",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url":    f"data:image/jpeg;base64,{b64}",
+                            "detail": "high",
+                        },
+                    },
+                ],
+            }
         ],
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=RESPONSE_SCHEMA,
-            temperature=0.1,
-            max_output_tokens=8192,
-        ),
     )
 
-    if not response.text:
-        raise ValueError("Gemini returned an empty response.")
+    raw = response.choices[0].message.content
+    if not raw:
+        raise ValueError("OpenAI returned an empty response.")
 
-    # Schema guarantees valid JSON — no fence stripping or dict-unwrapping needed
     try:
-        data = json.loads(response.text)
+        data = json.loads(raw)
     except json.JSONDecodeError as e:
-        raise ValueError(
-            f"JSON parse error (unexpected with schema enforced) — {e}. "
-            f"Raw response (first 300 chars): {response.text[:300]}"
-        )
+        raise ValueError(f"JSON parse error: {e}. Raw response (first 300 chars): {raw[:300]}")
 
-    if not isinstance(data, list) or len(data) == 0:
-        raise ValueError("API returned no product rows.")
+    # Extract products array — handle {"products": [...]} or bare list
+    if isinstance(data, list):
+        products = data
+    else:
+        products = data.get("products", [])
+        if not products:
+            for v in data.values():
+                if isinstance(v, list) and len(v) > 0:
+                    products = v
+                    break
 
-    return data
+    if not isinstance(products, list) or len(products) == 0:
+        raise ValueError("No product rows found in API response.")
+
+    return products
 
 
-def process_one_image(client, file_info: dict) -> tuple[pd.DataFrame | None, str | None]:
+def process_one_image(
+    client: OpenAI, file_info: dict
+) -> tuple[pd.DataFrame | None, str | None]:
     """
-    Process a single image through the full pipeline.
+    Full pipeline for one image: API call, parse, normalise, rename.
     Returns (DataFrame, None) on success or (None, error_string) on failure.
-    Retries up to 3 times with back-off tuned to the error type.
+    Retries up to 3 times with backoff tuned to the error type.
     """
     name = file_info["name"]
     retailer, city = parse_filename(name)
@@ -429,66 +392,56 @@ def process_one_image(client, file_info: dict) -> tuple[pd.DataFrame | None, str
     last_error = "Unknown error"
     for attempt in range(3):
         try:
-            data = call_gemini(client, image_bytes, retailer, city)
+            products = call_openai(client, image_bytes, retailer, city)
 
-            df = pd.DataFrame(data)
+            df = pd.DataFrame(products)
             if df.empty:
                 raise ValueError("DataFrame built from API response is empty.")
 
-            # Normalise placeholder strings
             df = df.replace(
                 ["N/A", "n/a", "Unknown", "unknown", "None", "none", "null", "NULL"],
                 "",
             )
 
-            # Add context columns
             df["Image name"] = name
             df["Retailer"]   = retailer
             df["City"]        = city
 
-            # Ensure all expected AI columns exist
             for col in AI_EXPECTED_COLS:
                 if col not in df.columns:
                     df[col] = ""
 
-            # Normalise numeric fields
             if "Pack_Size" in df.columns:
                 df["Pack_Size"] = df["Pack_Size"].apply(standardize_pack_size)
             df = standardize_prices(df)
-
-            # Rename to display column names
             df.rename(columns=COL_RENAME, inplace=True)
 
             return df, None
 
         except Exception as exc:
             last_error = str(exc)
-            if attempt < 2:                              # still have retries left
+            if attempt < 2:
                 err_lower = last_error.lower()
-                if "429" in err_lower or "quota" in err_lower or "resource_exhausted" in err_lower:
-                    # Exponential backoff: 30s then 90s.
-                    # Flat 20s was insufficient for sustained quota pressure.
-                    wait = 30 * (3 ** attempt)           # 30s, then 90s
-                    time.sleep(wait)
-                elif any(x in err_lower for x in ("timeout", "503", "504")):
-                    time.sleep(15 * (attempt + 1))       # 15s, then 30s
+                if "rate_limit" in err_lower or "429" in err_lower or "quota" in err_lower:
+                    time.sleep(30 * (3 ** attempt))   # 30s then 90s
+                elif any(x in err_lower for x in ("timeout", "503", "504", "500")):
+                    time.sleep(15 * (attempt + 1))    # 15s then 30s
                 elif "json" in err_lower or "empty" in err_lower:
-                    time.sleep(3)                        # parse issue — quick retry
+                    time.sleep(3)
                 else:
-                    time.sleep(5)                        # generic back-off
+                    time.sleep(5)
 
     return None, last_error
 
 
 # ── 8. MAIN APP ────────────────────────────────────────────────────────────────
-st.title("🔍 AI Shelf Intelligence")
+st.title("AI Shelf Intelligence")
 
 # ─── UPLOAD PANEL ─────────────────────────────────────────────────────────────
-# Only shown when idle (not mid-run and not finished)
 if not st.session_state["processing"] and not st.session_state["audit_complete"]:
 
     uploaded = st.file_uploader(
-        "Upload shelf images or a `.zip` file — files should be named `Retailer-City-ShelfID.jpg`",
+        "Upload shelf images or a zip file — name files as Retailer-City-ShelfID.jpg",
         type=["jpg", "jpeg", "png", "zip"],
         accept_multiple_files=True,
     )
@@ -496,53 +449,43 @@ if not st.session_state["processing"] and not st.session_state["audit_complete"]
     if uploaded:
         queue = load_uploaded_files(uploaded)
         if not queue:
-            st.warning("⚠️ No valid images (.jpg / .jpeg / .png) found in the upload.")
+            st.warning("No valid images (.jpg / .jpeg / .png) found in the upload.")
         else:
-            st.info(f"✅ **{len(queue)} image(s)** ready to process.")
+            st.info(f"{len(queue)} image(s) ready to process.")
             if not api_key:
-                st.warning("⚠️ Please enter your Gemini API key in the sidebar before starting.")
+                st.warning("Please enter your OpenAI API key in the sidebar before starting.")
             else:
-                if st.button(f"🚀 Start Audit  ({len(queue)} images)", type="primary"):
-                    # Store everything needed for the run in session state.
-                    # From this point on, no tempfiles, no local paths — just bytes.
-                    st.session_state["image_queue"]   = queue
-                    st.session_state["results"]       = []
-                    st.session_state["failed_files"]  = []
-                    st.session_state["current_index"] = 0
-                    st.session_state["processing"]    = True
-                    st.session_state["audit_complete"]= False
+                if st.button(f"Start Audit ({len(queue)} images)", type="primary"):
+                    st.session_state["image_queue"]    = queue
+                    st.session_state["results"]        = []
+                    st.session_state["failed_files"]   = []
+                    st.session_state["current_index"]  = 0
+                    st.session_state["processing"]     = True
+                    st.session_state["audit_complete"] = False
                     st.rerun()
 
 
-# ─── PROCESSING LOOP (one image per Streamlit render cycle) ───────────────────
-#
-# Key design principle: instead of a Python for-loop (which Streamlit can
-# interrupt at any re-render), we process ONE image each time this block runs,
-# save the result to session state, then call st.rerun() to trigger the next.
-# Connection drops simply pause the loop — all completed results are safe.
-#
+# ─── PROCESSING LOOP ──────────────────────────────────────────────────────────
 if st.session_state["processing"]:
 
     queue = st.session_state["image_queue"]
     idx   = st.session_state["current_index"]
     total = len(queue)
 
-    # ── Progress UI
-    st.write("### ⏱️ Live Processing")
+    st.write("### Live Processing")
     progress_bar = st.progress(idx / total if total > 0 else 0)
     status_box   = st.empty()
 
     if idx < total:
         file_info = queue[idx]
         status_box.info(
-            f"🔍 Analyzing image **{idx + 1} of {total}**: `{file_info['name']}`"
+            f"Analyzing image {idx + 1} of {total}: {file_info['name']}"
         )
 
-        # ── API call
-        client = genai.Client(api_key=api_key)
+        client = OpenAI(api_key=api_key, timeout=60.0)
         df_chunk, error = process_one_image(client, file_info)
 
-        # Free the image bytes immediately — no longer needed
+        # Free image bytes immediately — keeps memory flat across large batches
         st.session_state["image_queue"][idx]["bytes"] = None
 
         if df_chunk is not None:
@@ -553,50 +496,37 @@ if st.session_state["processing"]:
                 "error": error,
             })
 
-        # ── Advance index and update progress
         st.session_state["current_index"] += 1
         progress_bar.progress((idx + 1) / total)
 
-        # ── Show live results table (always visible, always downloadable)
         if st.session_state["results"]:
             live_df = build_results_df()
-            completed = len(st.session_state["results"])
-            failed_so_far = len(st.session_state["failed_files"])
             st.caption(
-                f"✅ {completed} processed  |  "
-                f"⚠️ {failed_so_far} failed  |  "
-                f"📦 {len(live_df)} products extracted so far"
+                f"{len(st.session_state['results'])} processed  |  "
+                f"{len(st.session_state['failed_files'])} failed  |  "
+                f"{len(live_df)} products extracted so far"
             )
             st.dataframe(
                 live_df.style.apply(highlight_low_confidence, axis=1),
                 use_container_width=True,
             )
-            # Interim download available at all times
             st.download_button(
-                "📥 Download current results (CSV)",
+                "Download current results (CSV)",
                 data=live_df.to_csv(index=False).encode("utf-8"),
                 file_name="shelf_intelligence_partial.csv",
                 mime="text/csv",
-                key=f"dl_interim_{idx}",   # unique key per render to avoid Streamlit warnings
+                key=f"dl_interim_{idx}",
             )
 
-        # ── Small inter-image pause — prevents RPM quota bursting.
-        # The state machine rerun adds ~2s naturally but an explicit pause
-        # ensures we never exceed ~15 req/min even on fast connections.
-        time.sleep(2)
-
-        # ── Trigger next image
         st.rerun()
 
     else:
-        # All images attempted — wrap up
-        st.session_state["processing"]    = False
-        st.session_state["audit_complete"]= True
+        st.session_state["processing"]     = False
+        st.session_state["audit_complete"] = True
         st.rerun()
 
 
 # ─── RESULTS PANEL ────────────────────────────────────────────────────────────
-# Shown when complete OR when processing was interrupted but results exist.
 has_results = bool(st.session_state["results"])
 is_complete = st.session_state["audit_complete"]
 
@@ -608,40 +538,33 @@ if is_complete or (not st.session_state["processing"] and has_results):
 
     if is_complete:
         st.success(
-            f"✅ Audit complete — **{n_ok}** image(s) processed successfully"
-            + (f", **{n_fail}** failed." if n_fail else ".")
+            f"Audit complete — {n_ok} image(s) processed successfully"
+            + (f", {n_fail} failed." if n_fail else ".")
         )
     else:
-        st.warning(
-            f"⚠️ Processing was interrupted. **{n_ok}** image(s) completed before interruption."
-        )
+        st.warning(f"Processing interrupted. {n_ok} image(s) completed.")
 
-    # ── Failed file details (expandable, with full error messages)
     if n_fail:
-        with st.expander(f"⚠️ {n_fail} image(s) could not be processed — click for details"):
+        with st.expander(f"{n_fail} image(s) failed — click for details"):
             for item in st.session_state["failed_files"]:
                 st.error(f"**{item['name']}**\n\n{item['error']}")
 
-    # ── Final results table
-    st.write(
-        f"### 📊 Results — {len(final_df)} products across {n_ok} image(s)"
-    )
+    st.write(f"### Results — {len(final_df)} products across {n_ok} image(s)")
     st.dataframe(
         final_df.style.apply(highlight_low_confidence, axis=1),
         use_container_width=True,
     )
 
-    # ── Download + reset controls
     col_dl, col_reset = st.columns([2, 1])
     with col_dl:
         st.download_button(
-            "📥 Download Full Report (CSV)",
+            "Download Full Report (CSV)",
             data=final_df.to_csv(index=False).encode("utf-8"),
             file_name="shelf_intelligence_output.csv",
             mime="text/csv",
         )
     with col_reset:
-        if st.button("🗑️ Clear & Start New Audit"):
+        if st.button("Clear and Start New Audit"):
             for k, v in _DEFAULTS.items():
                 st.session_state[k] = (
                     []    if isinstance(v, list)
