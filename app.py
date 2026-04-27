@@ -107,8 +107,8 @@ A complete scan of a standard convenience store fridge or shelf typically yields
 
 CRITICAL: Only list products you can visually confirm in this image.
 Do NOT list products based on what you would expect to find in this type of store or country.
-If you cannot read enough of a label to confirm the brand with confidence, skip that product entirely.
-Do NOT invent plausible products to fill gaps — an absent row is better than a hallucinated one.
+If you cannot fully read a label but can see enough to identify the brand, include the product and set Confidence to Low.
+Only skip a product entirely if you cannot identify the brand at all — a partial read with Low confidence is more useful than an absent row.
 
 CRITICAL: Each unique product (SKU) must appear EXACTLY ONCE in your output.
 Do NOT create a separate row for each individual can or bottle.
@@ -143,6 +143,7 @@ Aje Group: Big Cola, Cifrut, Sporade, Cielo, Pulp.
 
 --- CATEGORY NOTES ---
 Apply these corrections before assigning Category — they override general rules:
+- Cristal (Postobon) is a STILL WATER brand, not a carbonated soft drink.
 - Hit (Postobon) is a JUICE DRINK / NECTAR, not a carbonated soft drink.
 - Del Valle is a JUICE brand, not a carbonated soft drink.
 - Vive100% is a FUNCTIONAL / ENERGY DRINK, not a carbonated soft drink.
@@ -592,7 +593,7 @@ def process_one_image(
             # "Vive 100% Original", "Vive 100% Fusion", and "Vive 100%" all
             # resolve to the same key and only the first occurrence is kept.
             _VARIANT_SUFFIXES = re.compile(
-                r'\b(original|classic|light|zero|regular|fusion|limon|naranja|'
+                r'\b(light|zero|regular|fusion|limon|naranja|'
                 r'mora|fresa|citrus|citricos|lemon|lime|orange|strawberry|'
                 r'roja|negra|dorada|blanca|diet|max|ultra|plus|extra)\b',
                 re.IGNORECASE
