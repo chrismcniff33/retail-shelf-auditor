@@ -1,9 +1,9 @@
 import streamlit as st
-from openai import OpenAI
+from google import genai
+from google.genai import types
 import pandas as pd
 from PIL import Image
 import io
-import base64
 import hmac
 import re
 import json
@@ -94,7 +94,20 @@ SYSTEM_PROMPT = """
 You are a global retail data expert strictly adhering to Euromonitor category definitions. Analyze this shelf image.
 Context: The image filename suggests the retailer and city.
 
-CRITICAL INSTRUCTION: Scan systematically (top-to-bottom, left-to-right) to ensure absolutely ZERO products are missed.
+CRITICAL INSTRUCTION: Before extracting any data, mentally divide the image into sections:
+- Left side vs right side (if multiple units or bays are visible)
+- Top shelf, upper-middle shelf, lower-middle shelf, bottom shelf within each unit
+Work through EVERY section methodically. For each section identify ALL products including those:
+- Partially obscured by other products
+- Visible through glass or reflections
+- At the back of the shelf behind front-row products
+- Only partially in frame at the edges
+DO NOT stop until every visible product in every section has been captured.
+A complete scan of a standard convenience store fridge or shelf typically yields 20-50 product rows.
+
+CRITICAL JSON INSTRUCTIONS:
+- Return a strictly valid JSON array of product objects. No markdown, no wrapper object.
+- Do NOT use unescaped double quotes inside string values.
 
 --- MANUFACTURER DICTIONARY ---
 Use this mapping to assign "Manufacturer". If a brand is not listed, use your internal knowledge.
@@ -113,15 +126,15 @@ TGI Group: Chivita, Hollandia.
 Aje Group: Big Cola, Cifrut, Sporade, Cielo, Pulp.
 --- END DICTIONARY ---
 
-Task: Extract all visible products. Return a JSON object with a single key "products" containing an array of product objects.
-Each product object must contain ALL of the following keys. Return an empty string for any unknown value.
+Task: Extract all visible products. Return a JSON array where each element is a product object.
+Each object must contain ALL of the following keys. Return an empty string for any unknown value.
 
 1.  "Product_Name":   Specific name on label.
 2.  "Brand":          Brand name.
 3.  "Manufacturer":   Use the DICTIONARY above. If not listed, use your knowledge.
 4.  "Category":       Most granular Euromonitor category possible.
 5.  "Country":        Country based on City/Retailer context.
-6.  "Pack_Size":      ml (liquids) or g (solids). Numbers ONLY. Priority:
+6.  "Pack_Size":      ml (liquids) or g (solids). Numbers ONLY. Priority order:
                       a) Read from label (front, side, cap, base).
                       b) Infer from identical products visible elsewhere in the image.
                       c) Apply brand knowledge (e.g. Coca-Cola 330ml can, Heineken 500ml bottle).
@@ -144,17 +157,17 @@ Each product object must contain ALL of the following keys. Return an empty stri
 # ── 6. SIDEBAR ─────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("Settings")
-    if "OPENAI_API_KEY" in st.secrets:
-        api_key = st.secrets["OPENAI_API_KEY"]
+    if "GOOGLE_API_KEY" in st.secrets:
+        api_key = st.secrets["GOOGLE_API_KEY"]
         st.success("API key loaded")
     else:
-        api_key = st.text_input("OpenAI API Key", type="password")
+        api_key = st.text_input("Google Gemini API Key", type="password")
         if not api_key:
             st.warning("API key required to start.")
 
     st.divider()
     st.subheader("Cost and Usage")
-    st.info("Approx. $1.50-2.00 per 1,000 images (GPT-4o-mini).")
+    st.info("Approx. $0.60-1.00 per 1,000 images (Gemini 2.0 Flash).")
     st.divider()
     st.markdown("""
     ### Instructions
@@ -180,15 +193,15 @@ def parse_filename(filename: str) -> tuple[str, str]:
 
 def compress_image(raw_bytes: bytes) -> bytes | None:
     """
-    Resize to max 800x800, JPEG quality 85.
-    At this resolution GPT-4o-mini reads shelf labels reliably
-    and responds in 5-12 seconds per image.
+    Resize to max 1024x1024, JPEG quality 85.
+    1024px gives Gemini 2.0 Flash enough detail to read labels on densely
+    stocked shelves including products visible through glass refrigerator doors.
     """
     try:
         with Image.open(io.BytesIO(raw_bytes)) as img:
             if img.mode != "RGB":
                 img = img.convert("RGB")
-            img.thumbnail((800, 800))
+            img.thumbnail((1024, 1024))
             buf = io.BytesIO()
             img.save(buf, format="JPEG", quality=85)
             return buf.getvalue()
@@ -284,6 +297,7 @@ def build_results_df() -> pd.DataFrame:
 
 
 def load_uploaded_files(uploaded_files) -> list[dict]:
+    """Read and compress all uploads into memory. Raw bytes are never stored."""
     queue = []
     for f in uploaded_files:
         if f.name.lower().endswith(".zip"):
@@ -303,7 +317,7 @@ def load_uploaded_files(uploaded_files) -> list[dict]:
                                     "bytes": compressed,
                                 })
                             else:
-                                st.warning(f"Could not read {n.split('/')[-1]} from zip — skipping.")
+                                st.warning(f"Could not read {n.split('/')[-1]} — skipping.")
             except Exception as e:
                 st.warning(f"Could not read {f.name}: {e}")
         elif f.name.lower().endswith((".jpg", ".jpeg", ".png")):
@@ -315,77 +329,56 @@ def load_uploaded_files(uploaded_files) -> list[dict]:
     return queue
 
 
-def call_openai(client: OpenAI, image_bytes: bytes, retailer: str, city: str) -> list[dict]:
+def call_gemini(client, image_bytes: bytes, retailer: str, city: str) -> list[dict]:
     """
-    Send one shelf image to GPT-4o-mini and return a list of product dicts.
-    json_object response format guarantees valid JSON on every call.
-    temperature=0.1 ensures consistent, deterministic field extraction.
+    Send one shelf image to Gemini 2.0 Flash and return a list of product dicts.
+    response_mime_type enforces JSON output. temperature=0.1 ensures consistency.
+    Raises a descriptive exception on any failure.
     """
-    b64 = base64.b64encode(image_bytes).decode("utf-8")
-
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        response_format={"type": "json_object"},
-        temperature=0.1,
-        max_tokens=16000,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": SYSTEM_PROMPT + f"\nContext: This store is in {city}, {retailer}.",
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url":    f"data:image/jpeg;base64,{b64}",
-                            "detail": "high",
-                        },
-                    },
-                ],
-            }
+    response = client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=[
+            SYSTEM_PROMPT + f"\nContext: This store is in {city}, {retailer}.",
+            types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
         ],
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            temperature=0.1,
+            max_output_tokens=8192,
+        ),
     )
 
-    # Warn if the model hit the token limit mid-response — products would be missing
-    finish_reason = response.choices[0].finish_reason
-    if finish_reason == "length":
-        raise ValueError(
-            "Response was truncated (finish_reason=length). "
-            "The shelf may have more products than the model could output in one pass. "
-            "Try splitting the image into closer-cropped sections."
-        )
+    if not response.text:
+        raise ValueError("Gemini returned an empty response.")
 
-    raw = response.choices[0].message.content
-    if not raw:
-        raise ValueError("OpenAI returned an empty response.")
+    raw = response.text.strip()
+
+    # Strip accidental markdown fences
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
+    if raw.endswith("```"):
+        raw = raw[:-3]
+    raw = raw.strip()
 
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as e:
-        raise ValueError(f"JSON parse error: {e}. Raw response (first 300 chars): {raw[:300]}")
+        raise ValueError(f"JSON parse error: {e}. Raw (first 300 chars): {raw[:300]}")
 
-    # Extract products array — handle {"products": [...]} or bare list
-    if isinstance(data, list):
-        products = data
-    else:
-        products = data.get("products", [])
-        if not products:
-            for v in data.values():
-                if isinstance(v, list) and len(v) > 0:
-                    products = v
-                    break
+    # Handle model occasionally wrapping the array in an object
+    if isinstance(data, dict):
+        for v in data.values():
+            if isinstance(v, list) and len(v) > 0:
+                data = v
+                break
 
-    if not isinstance(products, list) or len(products) == 0:
+    if not isinstance(data, list) or len(data) == 0:
         raise ValueError("No product rows found in API response.")
 
-    return products
+    return data
 
 
-def process_one_image(
-    client: OpenAI, file_info: dict
-) -> tuple[pd.DataFrame | None, str | None]:
+def process_one_image(client, file_info: dict) -> tuple[pd.DataFrame | None, str | None]:
     """
     Full pipeline for one image: API call, parse, normalise, rename.
     Returns (DataFrame, None) on success or (None, error_string) on failure.
@@ -401,9 +394,9 @@ def process_one_image(
     last_error = "Unknown error"
     for attempt in range(3):
         try:
-            products = call_openai(client, image_bytes, retailer, city)
+            data = call_gemini(client, image_bytes, retailer, city)
 
-            df = pd.DataFrame(products)
+            df = pd.DataFrame(data)
             if df.empty:
                 raise ValueError("DataFrame built from API response is empty.")
 
@@ -431,10 +424,12 @@ def process_one_image(
             last_error = str(exc)
             if attempt < 2:
                 err_lower = last_error.lower()
-                if "rate_limit" in err_lower or "429" in err_lower or "quota" in err_lower:
+                if "429" in err_lower or "quota" in err_lower or "resource_exhausted" in err_lower:
                     time.sleep(30 * (3 ** attempt))   # 30s then 90s
-                elif any(x in err_lower for x in ("timeout", "503", "504", "500")):
+                elif any(x in err_lower for x in ("503", "504", "500", "unavailable")):
                     time.sleep(15 * (attempt + 1))    # 15s then 30s
+                elif "timeout" in err_lower:
+                    time.sleep(10 * (attempt + 1))
                 elif "json" in err_lower or "empty" in err_lower:
                     time.sleep(3)
                 else:
@@ -462,7 +457,7 @@ if not st.session_state["processing"] and not st.session_state["audit_complete"]
         else:
             st.info(f"{len(queue)} image(s) ready to process.")
             if not api_key:
-                st.warning("Please enter your OpenAI API key in the sidebar before starting.")
+                st.warning("Please enter your Gemini API key in the sidebar before starting.")
             else:
                 if st.button(f"Start Audit ({len(queue)} images)", type="primary"):
                     st.session_state["image_queue"]    = queue
@@ -491,7 +486,7 @@ if st.session_state["processing"]:
             f"Analyzing image {idx + 1} of {total}: {file_info['name']}"
         )
 
-        client = OpenAI(api_key=api_key, timeout=60.0)
+        client = genai.Client(api_key=api_key)
         df_chunk, error = process_one_image(client, file_info)
 
         # Free image bytes immediately — keeps memory flat across large batches
