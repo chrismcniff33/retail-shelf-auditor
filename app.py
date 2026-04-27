@@ -105,6 +105,11 @@ Work through EVERY section methodically. For each section identify ALL products 
 DO NOT stop until every visible product in every section has been captured.
 A complete scan of a standard convenience store fridge or shelf typically yields 15-25 unique product rows.
 
+CRITICAL: Only list products you can visually confirm in this image.
+Do NOT list products based on what you would expect to find in this type of store or country.
+If you cannot read enough of a label to confirm the brand with confidence, skip that product entirely.
+Do NOT invent plausible products to fill gaps — an absent row is better than a hallucinated one.
+
 CRITICAL: Each unique product (SKU) must appear EXACTLY ONCE in your output.
 Do NOT create a separate row for each individual can or bottle.
 Use the Facings field to record how many of that SKU are visible across the entire section.
@@ -119,10 +124,13 @@ CRITICAL OUTPUT FORMAT:
 --- MANUFACTURER DICTIONARY ---
 Use this mapping to assign "Manufacturer". If a brand is not listed, use your internal knowledge.
 Postobon S.A.: Postobon, Hit, Cristal, Bretana, Colombiana, Popular, Freskola, Hipinto, Speed Max, Peak, Sr. Toronjo, Agua Oasis.
+  Note: Speed Max is sold in ALUMINIUM CANS, not plastic bottles.
 PepsiCo: Pepsi, 7Up, Mirinda, Mountain Dew, H2Oh!, Gatorade, Aquafina, Teem, Lipton Ice Tea (JV), Lays, Doritos.
 The Coca-Cola Company: Coca-Cola, Sprite, Fanta, Quatro, Brisa, Manantial, Valle, Del Valle, Powerade, Fuze Tea, Eva, Five Alive.
 Quala: Vive100%, Suntea, Saviloe, Ego, Light, Bonyurt (Alpina JV).
+  Note: Vive100% is sold in ALUMINIUM CANS (375ml), not plastic bottles.
 Bavaria (AB InBev): Pony Malta, Malta Leona, Aguila, Poker, Club Colombia, Costena, Corona, Stella Artois, Budweiser.
+  Note: Pony Malta and Malta Leona are sold in CANS (300ml).
 Heineken N.V.: Heineken, Amstel, Sol, Desperados.
 Diageo: Smirnoff, Johnnie Walker, Baileys, Guinness, Malta Guinness, Orijin.
 Nestle: Milo, Nescafe, Pure Life, Nestea, Bikkle.
@@ -132,6 +140,17 @@ Rite Foods: Bigi, Fearless, Rite.
 TGI Group: Chivita, Hollandia.
 Aje Group: Big Cola, Cifrut, Sporade, Cielo, Pulp.
 --- END DICTIONARY ---
+
+--- CATEGORY NOTES ---
+Apply these corrections before assigning Category — they override general rules:
+- Hit (Postobon) is a JUICE DRINK / NECTAR, not a carbonated soft drink.
+- Del Valle is a JUICE brand, not a carbonated soft drink.
+- Vive100% is a FUNCTIONAL / ENERGY DRINK, not a carbonated soft drink.
+- Malta drinks (Pony Malta, Malta Leona, Malta Guinness) are NON-ALCOHOLIC MALT BEVERAGES.
+- H2Oh! is a FLAVOURED WATER, not a carbonated soft drink.
+- Fuze Tea, Lipton Ice Tea, Nestea are ICED TEA / READY-TO-DRINK TEA.
+- Gatorade, Powerade, Aquarius are SPORTS DRINKS.
+--- END CATEGORY NOTES ---
 
 Task: Extract all visible products. Output each product as a standalone JSON object on its own line.
 Each object must contain ALL of the following keys. Return an empty string for any unknown value.
@@ -569,14 +588,26 @@ def process_one_image(
                 )
 
             # Deduplicate products that appear in the overlap between sections.
-            # Key: brand + product name (case-insensitive). Keep first occurrence.
+            # Uses fuzzy key: strips common flavour/variant suffixes so that
+            # "Vive 100% Original", "Vive 100% Fusion", and "Vive 100%" all
+            # resolve to the same key and only the first occurrence is kept.
+            _VARIANT_SUFFIXES = re.compile(
+                r'\b(original|classic|light|zero|regular|fusion|limon|naranja|'
+                r'mora|fresa|citrus|citricos|lemon|lime|orange|strawberry|'
+                r'roja|negra|dorada|blanca|diet|max|ultra|plus|extra)\b',
+                re.IGNORECASE
+            )
+
+            def _dedup_key(p: dict) -> str:
+                brand = str(p.get("Brand", "")).lower().strip()
+                name  = str(p.get("Product_Name", "")).lower().strip()
+                name  = _VARIANT_SUFFIXES.sub("", name).strip()
+                return f"{brand}|{name}"
+
             seen: set[str] = set()
             unique_data: list[dict] = []
             for product in all_data:
-                key = (
-                    str(product.get("Brand", "")).lower().strip() + "|" +
-                    str(product.get("Product_Name", "")).lower().strip()
-                )
+                key = _dedup_key(product)
                 if key not in seen:
                     seen.add(key)
                     unique_data.append(product)
