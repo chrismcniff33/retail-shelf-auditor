@@ -1,5 +1,6 @@
 import streamlit as st
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import pandas as pd
 from PIL import Image
 import time
@@ -288,8 +289,7 @@ if uploaded_files:
                 st.session_state['failed_files'] = []
                 st.session_state['live_data_chunks'] = []
                 
-                genai.configure(api_key=api_key)
-                model = genai.GenerativeModel('gemini-2.5-flash')
+                client = genai.Client(api_key=api_key)
                 
                 st.write("### ⏱️ Live Processing Progress")
                 progress_bar = st.progress(0)
@@ -312,15 +312,18 @@ if uploaded_files:
                             image_bytes = prepare_image(file_path)
                             
                             if image_bytes:
-                                response = model.generate_content(
-                                    [SYSTEM_PROMPT + f"\nContext: This store is in {city}, {retailer}.",
-                                     {"mime_type": "image/jpeg", "data": image_bytes}],
-                                    generation_config={
-                                        "response_mime_type": "application/json",
-                                        "temperature": 0.4,
-                                        "max_output_tokens": 8192
-                                    },
-                                    request_options={"timeout": 600} 
+                                response = client.models.generate_content(
+                                    model='gemini-2.5-flash',
+                                    contents=[
+                                        SYSTEM_PROMPT + f"\nContext: This store is in {city}, {retailer}.",
+                                        types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg')
+                                    ],
+                                    config=types.GenerateContentConfig(
+                                        response_mime_type='application/json',
+                                        temperature=0.4,
+                                        max_output_tokens=8192,
+                                        thinking_config=types.ThinkingConfig(thinking_budget=0),
+                                    )
                                 )
                                 
                                 if response.text:
@@ -398,7 +401,6 @@ if uploaded_files:
                                             del parsed_json
                                             gc.collect()
                                             
-                                            time.sleep(4)
                                             break 
                                             
                                         else:
@@ -416,11 +418,8 @@ if uploaded_files:
                                             continue
                                             
                         except Exception as e:
-                            error_msg = str(e).lower()
-                            # Surface API-level errors immediately so they're visible to the user
-                            if any(x in error_msg for x in ["404", "not found", "deprecated", "model"]):
-                                st.error(f"🚨 API Model Error on **{file_name}**: {str(e)}\n\nThe model may be deprecated — check the model name in the code.")
                             if attempt < max_retries - 1:
+                                error_msg = str(e).lower()
                                 if "429" in error_msg or "quota" in error_msg:
                                     time.sleep(15) 
                                 elif "timeout" in error_msg or "503" in error_msg or "504" in error_msg:
