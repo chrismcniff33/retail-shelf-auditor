@@ -459,7 +459,7 @@ def call_gemini_streaming(
                     types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
                 ],
                 config=types.GenerateContentConfig(
-                    temperature=0.2,
+                    temperature=0.1,
                     max_output_tokens=16000,
                 ),
             )
@@ -595,7 +595,7 @@ def process_one_image(
             # "Vive 100% Original", "Vive 100% Fusion", and "Vive 100%" all
             # resolve to the same key and only the first occurrence is kept.
             _VARIANT_SUFFIXES = re.compile(
-                r'\b(light|zero|regular|fusion|limon|naranja|'
+                r'\b(light|zero|regular|fusion|limon|limonada|naranja|'
                 r'mora|fresa|citrus|citricos|lemon|lime|orange|strawberry|'
                 r'roja|negra|dorada|blanca|diet|max|ultra|plus|extra)\b',
                 re.IGNORECASE
@@ -604,6 +604,9 @@ def process_one_image(
             def _dedup_key(p: dict) -> str:
                 brand = str(p.get("Brand", "")).lower().strip()
                 name  = str(p.get("Product_Name", "")).lower().strip()
+                # Normalise spacing inconsistencies (e.g. "Vive 100%" vs "Vive100%")
+                brand = re.sub(r'\s+', '', brand)
+                name  = re.sub(r'\s+', '', name)
                 name  = _VARIANT_SUFFIXES.sub("", name).strip()
                 return f"{brand}|{name}"
 
